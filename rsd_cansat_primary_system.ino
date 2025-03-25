@@ -103,6 +103,7 @@ QueueHandle_t sd_card_queue;
 QueueHandle_t tft_queue;
 File tpa_log = File();
 File wind_log = File();
+float AIR_DENSITY = 1.29; //kg/m3
 
 
 /**************************
@@ -331,9 +332,12 @@ void task0(void *parameters) {
   uint32_t bmp1_timer = start;
   uint32_t bmp2_timer = start;
   uint32_t now;
+  float bmp1_recent_pressure = 0.0;
+
   SensorMeasurement measurement;
   auto &tpa = measurement.value.tpa;
-
+  auto &wind = measurement.value.wind;
+ 
   while (true) {
     now = millis();
     if (now >= idle_timer) {
@@ -351,22 +355,25 @@ void task0(void *parameters) {
         measurement.add_to_queue(radio_queue);
         measurement.add_to_queue(sd_card_queue);
         measurement.add_to_queue(tft_queue);
+        bmp1_recent_pressure = measurement.value.tpa.pressure;
         Serial.printf("%s measurement added to queue.\n", measurement.info().id);
       }
     } else if (now >= bmp2_timer) {
       bmp2_timer += 450;
-      measurement.timestamp = now;
-      measurement.type = WIND_SPEED;
-      measurement.value.wind.speed = 42.0;
-      measurement.add_to_queue(radio_queue);
-      measurement.add_to_queue(sd_card_queue);
-      measurement.add_to_queue(tft_queue);
-      Serial.printf("%s added to queue\n", measurement.info().id);
+     if (tpa.read(bmp2)) {
+       measurement.timestamp = now;
+       measurement.type = WIND_SPEED;
+       measurement.value.wind.speed = sqrt(2*(bmp1_recent_pressure - measurement.value.tpa.pressure)/AIR_DENSITY);
+       measurement.add_to_queue(radio_queue);
+       measurement.add_to_queue(sd_card_queue);
+       measurement.add_to_queue(tft_queue);
+       Serial.printf("%s added to queue\n", measurement.info().id);
+     }
     }
   }
 }
 
-void process_sensor_data(void *parameters) {
+void task1(void *parameters) {
   uint32_t start = millis();
   uint32_t timer = start;
   uint32_t sd_card_timer = start;
@@ -376,7 +383,7 @@ void process_sensor_data(void *parameters) {
   uint32_t now;
   SensorMeasurement measurement;
   auto &tpa = measurement.value.tpa;
-  char buf1[16], buf2[16], buf3[16];
+  char buf1[16], buf2[16], buf3[16]; //   WHY? - NOT USED - bernat
 
   while (true) {
     now = millis();
@@ -441,7 +448,7 @@ void setup() {
       Serial.printf("BMP390 (2) init failed\n");
   
     xTaskCreatePinnedToCore(task0, "task0", 4096, NULL, 1, NULL, 0);
-    xTaskCreatePinnedToCore(process_sensor_data, "process_sensor_data", 4096, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(task1, "task1", 4096, NULL, 1, NULL, 1);
 }
 
 void setup_tft() {
