@@ -8,6 +8,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <Adafruit_LSM6DSOX.h>
 
 
 /*****************
@@ -16,6 +17,12 @@
 #define SD_CS 10
 #define TFT_TEXT_SIZE 2
 #define SEA_LEVEL_PRESSURE 1010.0
+
+//sox
+#define LSM_CS 10
+#define LSM_SCK 13
+#define LSM_MISO 12
+#define LSM_MOSI 11
 
 
 /*******************
@@ -94,16 +101,24 @@ class BMP390 {
 /**********************
  *  Global variables  *
  **********************/
+//tft
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+//bmp
 BMP390 bmp1(0x77);  // Main pressure and temperature sensor.
 BMP390 bmp2(0x76);  // Wind measurement sensor.
+float AIR_DENSITY = 1.29; //kg/m3
+//SD
 bool sd_card_ok = false;
+File tpa_log = File();
+File wind_log = File();
+File accelerometer_log = File();
+//queue
 QueueHandle_t radio_queue;
 QueueHandle_t sd_card_queue;
 QueueHandle_t tft_queue;
-File tpa_log = File();
-File wind_log = File();
-float AIR_DENSITY = 1.29; //kg/m3
+//sox
+Adafruit_LSM6DSOX sox;
+float accelx, accely, accelz, delta_accel;
 
 
 /**************************
@@ -118,7 +133,8 @@ std::string float_to_string(float x);
 typedef enum {
   UNDEFINED,
   TEMPERATURE_PRESSURE_ALTITUDE,
-  WIND_SPEED
+  WIND_SPEED,
+  ACCELEROMETER
 } SensorType;
 
 struct SensorInfo {
@@ -156,9 +172,19 @@ struct Wind {
   }
 };
 
+struct Accelerometer {
+  float acceleration;
+
+  static inline const SensorInfo info{"accelerometer", {"accelaraion [g]"}};
+  std::string as_string() const {
+    return float_to_string(acceleration);
+  }
+};
+
 union SensorValue {
   TemperaturePressureAltitude tpa;
   Wind wind;
+  Accelerometer accelerometer;
 };
 
 struct SensorMeasurement {
@@ -173,6 +199,8 @@ struct SensorMeasurement {
         return TemperaturePressureAltitude::info;
       case WIND_SPEED:
         return Wind::info;
+      case ACCELEROMETER:
+        return Accelerometer::info;
       default:
         return undefined;
     }
@@ -259,6 +287,7 @@ void write_to_sd_card() {
   unsigned long start = micros();
   bool seen_tpa = false;
   bool seen_wind = false;
+  bool seen_accelerometer = false;
 
   while (xQueueReceive(sd_card_queue, &measurement, 0) == pdPASS) {
     measurements.push_back(measurement);
@@ -278,6 +307,11 @@ void write_to_sd_card() {
           seen_wind = true;
         }
         break;
+      case ACCELEROMETER:
+        if (accelerometer_log) {
+          accelerometer_log.printf("%s\t%s\n", timestamp.c_str(), m.value.wind.as_string().c_str());
+          seen_accelerometer = true;
+        }
     }
   }
   if (seen_tpa) {
@@ -285,6 +319,9 @@ void write_to_sd_card() {
   }
   if (seen_wind) {
     wind_log.flush();
+  }
+  if (seen_wind) {
+    accelerometer_log.flush();
   }
   unsigned long finish = micros();
   Serial.printf("Writing %d measurement(s) to SD card took %d us.\n", measurements.size(), finish - start);
@@ -295,8 +332,10 @@ void update_tft() {
   std::vector<SensorMeasurement> measurements;
   static TemperaturePressureAltitude tpa;
   static Wind wind;
+  static Accelerometer accelerometer;
   static bool seen_tpa = false;
   static bool seen_wind = false;
+  static bool seen_accelerometer = false;
   unsigned long start = micros();
   static char* blank_line = "                    ";
 
@@ -310,6 +349,10 @@ void update_tft() {
         wind = measurement.value.wind;
         seen_wind = true;
         break;
+      case ACCELEROMETER:
+        accelerometer = measurement.value.accelerometer;
+        seen_accelerometer = true;
+        break;
     }
   }
   tft.setCursor(0, 0);
@@ -317,6 +360,8 @@ void update_tft() {
     tft.printf("%5.1f C %7.2f hPa\n%5.1f m    \n", tpa.temperature, tpa.pressure, tpa.altitude);
   if (seen_wind)
     tft.printf("%5.1f m/s          \n", wind.speed);
+  if (seen_accelerometer)
+    tft.printf("%5.2f g          \n", accelerometer.acceleration);
   
   unsigned long finish = micros();
   Serial.printf("Updating TFT took %d us.\n", measurements.size(), finish - start);
@@ -331,12 +376,14 @@ void task0(void *parameters) {
   uint32_t idle_timer = start;
   uint32_t bmp1_timer = start;
   uint32_t bmp2_timer = start;
+  uint32_t accelerometer_timer = start;
   uint32_t now;
   float bmp1_recent_pressure = 0.0;
 
   SensorMeasurement measurement;
   auto &tpa = measurement.value.tpa;
   auto &wind = measurement.value.wind;
+  auto &acccelerometer = measurement.value.accelerometer;
  
   while (true) {
     now = millis();
@@ -359,16 +406,33 @@ void task0(void *parameters) {
         Serial.printf("%s measurement added to queue.\n", measurement.info().id);
       }
     } else if (now >= bmp2_timer) {
-      bmp2_timer += 450;
+      bmp2_timer += 300;
+      measurement.type = WIND_SPEED;
      if (tpa.read(bmp2)) {
-       measurement.timestamp = now;
-       measurement.type = WIND_SPEED;
-       measurement.value.wind.speed = sqrt(2*(bmp1_recent_pressure - measurement.value.tpa.pressure)/AIR_DENSITY);
-       measurement.add_to_queue(radio_queue);
-       measurement.add_to_queue(sd_card_queue);
-       measurement.add_to_queue(tft_queue);
-       Serial.printf("%s added to queue\n", measurement.info().id);
+      measurement.timestamp = now;
+      measurement.value.wind.speed = sqrt(2*(bmp1_recent_pressure - measurement.value.tpa.pressure)/AIR_DENSITY);
+      measurement.add_to_queue(radio_queue);
+      measurement.add_to_queue(sd_card_queue);
+      measurement.add_to_queue(tft_queue);
+      Serial.printf("%s added to queue\n", measurement.info().id);
      }
+    } else if (now >= accelerometer_timer) {
+        accelerometer_timer += 200;
+        sensors_event_t accel;
+        sensors_event_t gyro;
+        sensors_event_t temp;
+        if (sox.getEvent(&accel, &gyro, &temp)) {
+          accelx = accel.acceleration.x;
+          accely = accel.acceleration.y;
+          accelz = accel.acceleration.z;
+          measurement.value.accelerometer.acceleration = sqrt((accelx*accelx+accely*accely)+accelz*accelz) * 2 / 9.81;
+          measurement.add_to_queue(radio_queue);
+          measurement.add_to_queue(sd_card_queue);
+          measurement.add_to_queue(tft_queue);
+          Serial.printf("%s added to queue\n", measurement.info().id);
+        } else {
+          Serial.printf("no accelometer\n");
+        }
     }
   }
 }
@@ -382,7 +446,7 @@ void task1(void *parameters) {
   uint16_t update_in_millis = 1000;
   uint32_t now;
   SensorMeasurement measurement;
-  auto &tpa = measurement.value.tpa;
+  //auto &tpa = measurement.value.tpa;    if (program not work) remove(//);
   char buf1[16], buf2[16], buf3[16]; //   WHY? - NOT USED - bernat
 
   while (true) {
@@ -404,6 +468,8 @@ void task1(void *parameters) {
           case WIND_SPEED:
             Serial.printf("%s\t%s\t%s\n", timestamp.c_str(), id, measurement.value.wind.as_string().c_str());
             break;
+          case ACCELEROMETER:
+            Serial.printf("%s\t%s\t%s\n", timestamp.c_str(), id, measurement.value.accelerometer.as_string().c_str());
         }
       }
     } else if (now >= sd_card_timer) {
@@ -428,6 +494,7 @@ void setup() {
     if (sd_card_ok = SD.begin(SD_CS, SPI, 50000000)) {
       tpa_log = initialize_log_file(TemperaturePressureAltitude::info);
       wind_log = initialize_log_file(Wind::info);
+      accelerometer_log = initialize_log_file(Accelerometer::info);
     } else {
       Serial.println("SD card FAILED");
     }
@@ -437,6 +504,7 @@ void setup() {
     Wire.setClock(100000);
 
     setup_tft();
+    setup_sox();
 
     if (bmp1.initialize())
       Serial.printf("BMP390 (1) init success\n");
@@ -465,4 +533,24 @@ void setup_tft() {
   tft.fillScreen(ST77XX_BLACK);
 }
 
+void setup_sox() {
+  if (!sox.begin_I2C()) {
+    Serial.println("NO ACCELEROMETER");
+  }
+  sox.setAccelRange(LSM6DS_ACCEL_RANGE_16_G);
+  switch (sox.getAccelRange()) {
+  case LSM6DS_ACCEL_RANGE_2_G:
+    Serial.println("+-2G");
+    break;
+  case LSM6DS_ACCEL_RANGE_4_G:
+    Serial.println("+-4G");
+    break;
+  case LSM6DS_ACCEL_RANGE_8_G:
+    Serial.println("+-8G");
+    break;
+  case LSM6DS_ACCEL_RANGE_16_G:
+    Serial.println("+-16G");
+    break;
+  }
+}
 void loop () {}
