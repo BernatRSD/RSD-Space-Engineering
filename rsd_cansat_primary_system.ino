@@ -1,14 +1,15 @@
 #include <optional>
 #include <sstream>
 
-#include <Adafruit_I2CDevice.h>
 #include <Adafruit_GFX.h>
+#include <Adafruit_I2CDevice.h>
+#include <Adafruit_LSM6DSOX.h>
 #include <Adafruit_ST7789.h>
 #include "bmp3.h"
+#include <RH_RF95.h>
 #include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
-#include <Adafruit_LSM6DSOX.h>
 
 
 /*****************
@@ -17,12 +18,12 @@
 #define SD_CS 10
 #define TFT_TEXT_SIZE 2
 #define SEA_LEVEL_PRESSURE 1010.0
-
-//sox
-#define LSM_CS 10
-#define LSM_SCK 13
-#define LSM_MISO 12
-#define LSM_MOSI 11
+// LoRa radio
+#define RF95_INT 12
+#define RF95_CS 5
+#define RF95_RST 11
+#define RF95_FREQ_MHZ 433.0
+#define RF95_TX_POWER_DBM 14
 
 
 /*******************
@@ -112,18 +113,34 @@ bool sd_card_ok = false;
 File tpa_log = File();
 File wind_log = File();
 File accelerometer_log = File();
+// LoRa radio
+RH_RF95 rf95(RF95_CS, RF95_INT);
+bool radio_ok = false;
 //queue
 QueueHandle_t radio_queue;
 QueueHandle_t sd_card_queue;
 QueueHandle_t tft_queue;
 //sox
 Adafruit_LSM6DSOX sox;
+bool accelerometer_ok = false;
 
 
 /**************************
  *  Forward declarations  *
  **************************/
 std::string float_to_string(float x);
+struct SensorInfo;
+
+// Template function to pack any type into bytes.
+template <typename T>
+size_t pack(T value, byte *bytes) {
+  byte *valueAsBytes = (byte *)&value;
+  size_t size = sizeof(T);
+  for (size_t i = 0; i < size; i++) {
+    bytes[i] = valueAsBytes[i];
+  }
+  return size;
+}
 
 
 /***************************
@@ -160,6 +177,13 @@ struct TemperaturePressureAltitude {
     auto a = float_to_string(altitude);
     return t + "\t" + p + "\t" + a;
   }
+  size_t add_to_radio_message(uint8_t *message) {
+    size_t size = 0;
+    size += pack(temperature, message+size);
+    size += pack(pressure, message+size);
+    size += pack(altitude, message+size);
+    return size;
+  }
 };
 
 struct Wind {
@@ -168,6 +192,9 @@ struct Wind {
   static inline const SensorInfo info{"wind", {"Wind speed [m/s]"}};
   std::string as_string() const {
     return float_to_string(speed);
+  }
+  size_t add_to_radio_message(uint8_t *message) {
+    return pack(speed, message);
   }
 };
 
@@ -186,6 +213,9 @@ struct Accelerometer {
   }
   std::string as_string() const {
     return float_to_string(acceleration);
+  }
+  size_t add_to_radio_message(uint8_t *message) {
+    return pack(acceleration, message);
   }
 };
 
@@ -224,6 +254,24 @@ struct SensorMeasurement {
     if (add_to_queue(sd_card_queue) != pdPASS) result = pdFAIL;
     if (add_to_queue(tft_queue) != pdPASS) result = pdFAIL;
     return result;
+  }
+
+  size_t add_to_radio_message(uint8_t *message) {
+    size_t size = 0;
+    size += pack(static_cast<uint8_t>(type), message+size);
+    size += pack(timestamp, message+size);
+    switch (type) {
+      case TEMPERATURE_PRESSURE_ALTITUDE:
+        size += value.tpa.add_to_radio_message(message+size);
+        break;
+      case WIND_SPEED:
+        size += value.tpa.add_to_radio_message(message+size);
+        break;
+      case ACCELEROMETER:
+        size += value.tpa.add_to_radio_message(message+size);
+        break;
+    }
+    return size;
   }
 };
 
@@ -305,7 +353,7 @@ void write_to_sd_card() {
   bool seen_wind = false;
   bool seen_accelerometer = false;
 
-  while (xQueueReceive(sd_card_queue, &measurement, 0) == pdPASS) {
+  while (xQueueReceive(sd_card_queue, &measurement, pdMS_TO_TICKS(5)) == pdPASS) {
     measurements.push_back(measurement);
   }
   for (auto& m : measurements) {
@@ -345,7 +393,6 @@ void write_to_sd_card() {
 
 void update_tft() {
   SensorMeasurement measurement;
-  std::vector<SensorMeasurement> measurements;
   static TemperaturePressureAltitude tpa{NAN, NAN, NAN};
   static Wind wind{NAN};
   static Accelerometer accelerometer{NAN};
@@ -371,9 +418,32 @@ void update_tft() {
   tft.printf("%5.2f g          \n", accelerometer.acceleration);
   
   unsigned long finish = micros();
-  Serial.printf("Updating TFT took %d us.\n", measurements.size(), finish - start);
+  Serial.printf("Updating TFT took %d us.\n", finish - start);
 }
 
+void send_radio_message() {
+  uint8_t message[RH_RF95_MAX_MESSAGE_LEN] = {0};
+  SensorMeasurement measurement;
+  std::vector<SensorMeasurement> measurements;
+
+  while (xQueueReceive(radio_queue, &measurement, pdMS_TO_TICKS(5)) == pdPASS) {
+    measurements.push_back(measurement);
+  }
+  // For now send only the last temperature/pressure/altitude measurement.
+  for (auto& m : measurements) {
+    switch (m.type) {
+      case TEMPERATURE_PRESSURE_ALTITUDE:
+        measurement = m;
+        break;
+    }
+  }
+  uint16_t size = 0;
+  size += measurement.add_to_radio_message(message);
+  rf95.send(message, size);
+  delay(10);
+  rf95.waitPacketSent();
+
+}
 
 /****************************
  *  Task Running on Core 0  *
@@ -397,7 +467,7 @@ void task0(void *parameters) {
     std::string now_str = timestamp_to_string(now);
     if (now >= idle_timer) {
       idle_timer += 1000;
-      Serial.printf("Read sensors: idle at %s\n", now_str.c_str());
+      Serial.printf("%s TASK0 IDLE\n", now_str.c_str());
       yield();  // This lets the system run its own tasks. Otherwise,
                 // the EPS32-S3 will restart after a few seconds.
     } else if (now >= bmp1_timer) {
@@ -409,7 +479,7 @@ void task0(void *parameters) {
         measurement.timestamp = now;
         measurement.add_to_all_queues();
         bmp1_recent_pressure = tpa.pressure;
-        Serial.printf("BMP1 measurement at %s\n", now_str.c_str());
+        Serial.printf("%s BMP1 %s\n", now_str.c_str(), tpa.as_string().c_str());
       }
     } else if (now >= bmp2_timer) {
       bmp2_timer += 300;
@@ -418,29 +488,29 @@ void task0(void *parameters) {
         measurement.timestamp = now;
         wind.speed = sqrt(2*(bmp1_recent_pressure - tpa.pressure)/AIR_DENSITY);
         measurement.add_to_all_queues();
-        Serial.printf("Wind measurement at %s\n", now_str.c_str());
+        Serial.printf("%s WIND %s\n", now_str.c_str(), wind.as_string().c_str());
       }
-    } else if (now >= accelerometer_timer) {
+    } else if (now >= accelerometer_timer && accelerometer_ok) {
       accelerometer_timer += 200;
       if (accelerometer.read(sox)) {
         measurement.type = ACCELEROMETER;
         measurement.timestamp = now;
         measurement.add_to_all_queues();
-        Serial.printf("%s added to queue\n", measurement.info().id);
-      } else {
-        Serial.printf("no accelometer\n");
+        Serial.printf("%s ACCELEROMETER %s\n", now_str.c_str(), accelerometer.as_string().c_str());
       }
     }
   }
 }
 
+/****************************
+ *  Task Running on Core 1  *
+ ****************************/
 void task1(void *parameters) {
   uint32_t start = millis();
-  uint32_t timer = start;
+  uint32_t radio_timer = start;
   uint32_t sd_card_timer = start;
   uint32_t tft_timer = start;
   uint32_t idle_timer = start;
-  uint16_t update_in_millis = 1000;
   uint32_t now;
   SensorMeasurement measurement;
   auto &tpa = measurement.value.tpa;
@@ -453,23 +523,9 @@ void task1(void *parameters) {
       idle_timer += 1000;
       yield();  // This lets the system run its own tasks. Otherwise,
                 // the EPS32-S3 will restart after a few seconds.
-    } else if (now >= timer) {
-      timer += update_in_millis;
-      // Fetch all data from the queue, stop when queue is empty.
-      while (xQueueReceive(radio_queue, &measurement, 0) == pdPASS) {
-        auto timestamp = timestamp_to_string(measurement.timestamp);
-        auto id = measurement.info().id;
-        switch (measurement.type) {
-          case TEMPERATURE_PRESSURE_ALTITUDE:
-            Serial.printf("%s\t%s\t%s\n", timestamp.c_str(), id, tpa.as_string().c_str());
-            break;
-          case WIND_SPEED:
-            Serial.printf("%s\t%s\t%s\n", timestamp.c_str(), id, wind.as_string().c_str());
-            break;
-          case ACCELEROMETER:
-            Serial.printf("%s\t%s\t%s\n", timestamp.c_str(), id, accelerometer.as_string().c_str());
-        }
-      }
+    } else if (now >= radio_timer && radio_ok) {
+      radio_timer += 1000;
+      send_radio_message();
     } else if (now >= sd_card_timer) {
       sd_card_timer += 2000;
       write_to_sd_card();
@@ -503,6 +559,7 @@ void setup() {
 
     setup_tft();
     setup_sox();
+    setup_lora();
 
     if (bmp1.initialize())
       Serial.printf("BMP390 (1) init success\n");
@@ -533,9 +590,36 @@ void setup_tft() {
 
 void setup_sox() {
   if (sox.begin_I2C()) {
+    accelerometer_ok = true;
     sox.setAccelRange(LSM6DS_ACCEL_RANGE_16_G);
   } else {
     Serial.println("NO ACCELEROMETER");
+  }
+}
+
+void setup_lora() {
+  pinMode(RF95_RST, OUTPUT);
+  digitalWrite(RF95_RST, HIGH);
+  delay(100);
+  digitalWrite(RF95_RST, LOW);
+  delay(10);
+  digitalWrite(RF95_RST, HIGH);
+  delay(10);
+  for (int i = 0; i < 3; i++) {
+    if (rf95.init()) {
+      radio_ok = true;
+      break;
+    }
+    delay(100);
+  }
+  if (radio_ok) {
+    Serial.println("LoRa radio OK");
+    if (!rf95.setFrequency(RF95_FREQ_MHZ)) {
+      Serial.println("LoRa setting frequency FAILED");
+    }
+    rf95.setTxPower(RF95_TX_POWER_DBM, false);
+  } else {
+    Serial.println("LoRa radio FAILED");
   }
 }
 
