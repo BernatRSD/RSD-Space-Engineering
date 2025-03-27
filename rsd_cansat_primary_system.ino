@@ -118,6 +118,7 @@ File ens_log = File();
 // LoRa radio
 RH_RF95 rf95(RF95_CS, RF95_INT);
 bool radio_ok = false;
+uint8_t phase=0;
 //queue
 QueueHandle_t radio_queue;
 QueueHandle_t sd_card_queue;
@@ -469,8 +470,10 @@ void update_tft() {
 
 void send_radio_message() {
   uint8_t message[RH_RF95_MAX_MESSAGE_LEN] = {0};
+  uint16_t size = 0;
+  //uint8_t message_length=0;
   SensorMeasurement measurement;
-  std::vector<SensorMeasurement> measurements;
+  std::vector<SensorMeasurement> measurements,measurements_bmp,measurements_wind,measurements_accelerometer,measurements_ens,measurements_co2,measurements_gps;
 
   while (xQueueReceive(radio_queue, &measurement, pdMS_TO_TICKS(5)) == pdPASS) {
     measurements.push_back(measurement);
@@ -479,12 +482,53 @@ void send_radio_message() {
   for (auto& m : measurements) {
     switch (m.type) {
       case TEMPERATURE_PRESSURE_ALTITUDE:
-        measurement = m;
+        measurements_bmp.push_back(m);
         break;
+      case WIND_SPEED:
+        measurements_wind.push_back(m);
+        break;
+      case ACCELEROMETER:
+        measurements_accelerometer.push_back(m);
+        break;
+/*      case ENS:
+        measurements_ens.push_back(m);
+        break;
+      case CO2:
+        measurements_co2.push_back(m);
+        break;
+      case GPS:
+        measurements_gps.push_back(m);
+        break;*/
     }
   }
-  uint16_t size = 0;
-  size += measurement.add_to_radio_message(message);
+  if (phase == 0 || phase == 1) {
+    if(measurements_bmp.size() >= 3) {
+      message[size] = 3; size++;//03 tízes helyiérték:0 - 0-ás számú szenzor adata
+      size += measurements_bmp[(measurements_bmp.size() / 3) - 1].add_to_radio_message(message);
+      size += measurements_bmp[((measurements_bmp.size() / 3) * 2) - 1].add_to_radio_message(message);
+      size += measurements_bmp[measurements_bmp.size() - 1].add_to_radio_message(message);
+    } else if(measurements_bmp.size() == 2) {
+      message[size] = 2; size++;
+      size += measurements_bmp[(measurements_bmp.size() / 2) - 1].add_to_radio_message(message);
+      size += measurements_bmp[measurements_bmp.size() - 1].add_to_radio_message(message);
+    } else if(measurements_bmp.size() == 1) {
+      message[size] = 1;  size++;
+      size += measurements_bmp[measurements_bmp.size() - 1].add_to_radio_message(message);
+    }
+    if(measurements_accelerometer.size()>=2) {
+      message[size]=22;  size++;
+      size += measurements_accelerometer[(measurements_accelerometer.size() / 2) - 1].add_to_radio_message(message);
+      size += measurements_accelerometer[measurements_accelerometer.size() - 1].add_to_radio_message(message);
+    } else if(measurements_accelerometer.size()==1) {
+      message[size]=22;  size++;
+      size += measurements_accelerometer[measurements_accelerometer.size() - 1].add_to_radio_message(message);
+    }
+    if(measurements_wind.size()>=1) {
+      message[size]=10; size++;
+      size += measurements_wind[measurements_wind.size()-1].add_to_radio_message(message);
+    }
+  }
+  //size += measurement.add_to_radio_message(message);
   rf95.send(message, size);
   delay(10);
   rf95.waitPacketSent();
@@ -572,7 +616,6 @@ void task1(void *parameters) {
   auto &tpa = measurement.value.tpa;
   auto &wind = measurement.value.wind;
   auto &accelerometer = measurement.value.accelerometer;
-  auto &ens = measurement.value.ens;
 
   while (true) {
     now = millis();
@@ -580,12 +623,18 @@ void task1(void *parameters) {
       idle_timer += 1000;
       yield();  // This lets the system run its own tasks. Otherwise,
                 // the EPS32-S3 will restart after a few seconds.
-    } else if (now >= radio_timer && radio_ok) {
-      radio_timer += 1000;
-      send_radio_message();
     } else if (now >= sd_card_timer) {
       sd_card_timer += 2000;
       write_to_sd_card();
+    } else if (now >= radio_timer && radio_ok) {
+      if (phase == 0) { 
+        radio_timer += 1000;
+      } else if (phase == 1) {
+        radio_timer=now;
+      } else {
+        radio_timer += 5000;
+      }
+      send_radio_message();
     } else if (now >= tft_timer) {
       tft_timer += 333;
       update_tft();
