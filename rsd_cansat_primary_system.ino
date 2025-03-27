@@ -10,6 +10,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
+#include "ScioSense_ENS160.h"
 
 
 /*****************
@@ -113,6 +114,7 @@ bool sd_card_ok = false;
 File tpa_log = File();
 File wind_log = File();
 File accelerometer_log = File();
+File ens_log = File();
 // LoRa radio
 RH_RF95 rf95(RF95_CS, RF95_INT);
 bool radio_ok = false;
@@ -123,6 +125,8 @@ QueueHandle_t tft_queue;
 //sox
 Adafruit_LSM6DSOX sox;
 bool accelerometer_ok = false;
+//ens160
+ScioSense_ENS160      ens160(ENS160_I2CADDR_1);
 
 
 /**************************
@@ -150,7 +154,8 @@ typedef enum {
   UNDEFINED,
   TEMPERATURE_PRESSURE_ALTITUDE,
   WIND_SPEED,
-  ACCELEROMETER
+  ACCELEROMETER,
+  ENS
 } SensorType;
 
 struct SensorInfo {
@@ -206,7 +211,7 @@ struct Accelerometer {
     sensors_event_t accel, gyro, temp;
     if (sox_sensor.getEvent(&accel, &gyro, &temp)) {
       sensors_vec_t& a = accel.acceleration;
-      acceleration = sqrt(a.x*a.x+a.y*a.y+a.z*a.z) / 9.81;
+      acceleration = sqrt(a.x*a.x+a.y*a.y+a.z*a.z) / 4.905;
       return true;
     }
     return false;
@@ -218,11 +223,33 @@ struct Accelerometer {
     return pack(acceleration, message);
   }
 };
+struct Ens {
+    uint16_t tvoc;
+
+    static inline const SensorInfo info{"tvoc", {"Tvoc [ppb]"}};
+    bool read(ScioSense_ENS160& ens_sensor) {
+      if (ens160.available()) {
+        ens160.measure(true);
+        ens160.measureRaw(true);
+        tvoc = ens160.getTVOC();
+        Serial.printf("TVOC: %u\n", tvoc);
+        return true;
+      }
+      return false;
+    }
+    std::string as_string() const {
+      return float_to_string(tvoc);
+    }
+    size_t add_to_radio_message(uint8_t *message) {
+      return pack(tvoc, message);
+    }
+};
 
 union SensorValue {
   TemperaturePressureAltitude tpa;
   Wind wind;
   Accelerometer accelerometer;
+  Ens ens;
 };
 
 struct SensorMeasurement {
@@ -239,6 +266,8 @@ struct SensorMeasurement {
         return Wind::info;
       case ACCELEROMETER:
         return Accelerometer::info;
+      case ENS:
+        return Ens::info;
       default:
         return undefined;
     }
@@ -265,10 +294,13 @@ struct SensorMeasurement {
         size += value.tpa.add_to_radio_message(message+size);
         break;
       case WIND_SPEED:
-        size += value.tpa.add_to_radio_message(message+size);
+        size += value.wind.add_to_radio_message(message+size);
         break;
       case ACCELEROMETER:
-        size += value.tpa.add_to_radio_message(message+size);
+        size += value.accelerometer.add_to_radio_message(message+size);
+        break;
+      case ENS:
+        size += value.ens.add_to_radio_message(message+size);
         break;
     }
     return size;
@@ -352,6 +384,7 @@ void write_to_sd_card() {
   bool seen_tpa = false;
   bool seen_wind = false;
   bool seen_accelerometer = false;
+  bool seen_ens = false;
 
   while (xQueueReceive(sd_card_queue, &measurement, pdMS_TO_TICKS(5)) == pdPASS) {
     measurements.push_back(measurement);
@@ -376,6 +409,10 @@ void write_to_sd_card() {
           accelerometer_log.printf("%s\t%s\n", timestamp.c_str(), m.value.accelerometer.as_string().c_str());
           seen_accelerometer = true;
         }
+      case ENS:
+        if (ens_log) {
+          ens_log.printf("%s\t%s\n", timestamp.c_str(), m.value.ens.as_string().c_str());
+        }
     }
   }
   if (seen_tpa) {
@@ -387,6 +424,9 @@ void write_to_sd_card() {
   if (seen_accelerometer) {
     accelerometer_log.flush();
   }
+  if (seen_ens) {
+    ens_log.flush();
+  }
   unsigned long finish = micros();
   Serial.printf("Writing %d measurement(s) to SD card took %d us.\n", measurements.size(), finish - start);
 }
@@ -396,6 +436,7 @@ void update_tft() {
   static TemperaturePressureAltitude tpa{NAN, NAN, NAN};
   static Wind wind{NAN};
   static Accelerometer accelerometer{NAN};
+  static Ens ens{0};
   unsigned long start = micros();
   static char* blank_line = "                    ";
 
@@ -410,12 +451,17 @@ void update_tft() {
       case ACCELEROMETER:
         accelerometer = measurement.value.accelerometer;
         break;
+      case ENS:
+        ens = measurement.value.ens;
+        Serial.println("EEEEEEEEEEEEEEENNNNNNNNNNNNNNNNNSSSSSSSSSSSSSSSSSSS");
+        break;
     }
   }
   tft.setCursor(0, 0);
   tft.printf("%5.1f C %7.2f hPa\n%5.1f m    \n", tpa.temperature, tpa.pressure, tpa.altitude);
   tft.printf("%5.1f m/s          \n", wind.speed);
   tft.printf("%5.2f g          \n", accelerometer.acceleration);
+  tft.printf("%5u ppb          \n", ens.tvoc);
   
   unsigned long finish = micros();
   Serial.printf("Updating TFT took %d us.\n", finish - start);
@@ -454,6 +500,7 @@ void task0(void *parameters) {
   uint32_t bmp1_timer = start;
   uint32_t bmp2_timer = start;
   uint32_t accelerometer_timer = start;
+  uint32_t ens_timer = start;
   uint32_t now;
   float bmp1_recent_pressure = 0.0;
   SensorMeasurement measurement;
@@ -461,6 +508,7 @@ void task0(void *parameters) {
   auto &tpa = measurement.value.tpa;
   auto &wind = measurement.value.wind;
   auto &accelerometer = measurement.value.accelerometer;
+  auto &ens = measurement.value.ens;
  
   while (true) {
     now = millis();
@@ -498,6 +546,14 @@ void task0(void *parameters) {
         measurement.add_to_all_queues();
         Serial.printf("%s ACCELEROMETER %s\n", now_str.c_str(), accelerometer.as_string().c_str());
       }
+    } else if (now >= ens_timer) {
+      ens_timer += 1044;
+      if (ens.read(ens160)) {
+        measurement.type = ENS;
+        measurement.timestamp = now;
+        measurement.add_to_all_queues();
+        Serial.printf("%s ENS %s\n", now_str.c_str(), ens.as_string().c_str());
+      }
     }
   }
 }
@@ -516,6 +572,7 @@ void task1(void *parameters) {
   auto &tpa = measurement.value.tpa;
   auto &wind = measurement.value.wind;
   auto &accelerometer = measurement.value.accelerometer;
+  auto &ens = measurement.value.ens;
 
   while (true) {
     now = millis();
@@ -549,6 +606,7 @@ void setup() {
       tpa_log = initialize_log_file(TemperaturePressureAltitude::info);
       wind_log = initialize_log_file(Wind::info);
       accelerometer_log = initialize_log_file(Accelerometer::info);
+      ens_log = initialize_log_file(Ens::info);
     } else {
       Serial.println("SD card FAILED");
     }
@@ -560,6 +618,7 @@ void setup() {
     setup_tft();
     setup_sox();
     setup_lora();
+    setup_ens();
 
     if (bmp1.initialize())
       Serial.printf("BMP390 (1) init success\n");
@@ -597,6 +656,12 @@ void setup_sox() {
   }
 }
 
+void setup_ens() {
+  ens160.begin();
+  Serial.print("ENS SETUP...   ");
+  Serial.println(ens160.available() ? "done." : "failed!");
+  ens160.setMode(ENS160_OPMODE_STD);
+}
 void setup_lora() {
   pinMode(RF95_RST, OUTPUT);
   digitalWrite(RF95_RST, HIGH);
