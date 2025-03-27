@@ -11,6 +11,8 @@
 #include <SPI.h>
 #include <Wire.h>
 #include "ScioSense_ENS160.h"
+#include <Arduino.h>
+#include <SensirionI2cScd4x.h>
 
 
 /*****************
@@ -25,13 +27,13 @@
 #define RF95_RST 11
 #define RF95_FREQ_MHZ 433.0
 #define RF95_TX_POWER_DBM 14
-
+#define NO_ERROR 0
 
 /*******************
  *  BMP390 Sensor  *
  *******************/
 class BMP390 {
- public:
+public:
   BMP390(uint8_t i2c_address): i2c_address(i2c_address) {}
   bool initialize() {
     device.intf = BMP3_I2C_INTF;
@@ -76,11 +78,11 @@ class BMP390 {
     //  http://www.adafruit.com/datasheets/BST-BMP180-DS000-09.pdf 
     return 44330.0 * (1.0 - pow(pressure / sea_level_pressure, 0.1903));
   }
- private:
+private:
   struct bmp3_dev device;
   const uint8_t i2c_address;
   static int8_t i2c_read(uint8_t reg_addr, uint8_t *reg_data,
-                         uint32_t len, void *intf_ptr) {
+                        uint32_t len, void *intf_ptr) {
     auto* i2c_dev = reinterpret_cast<Adafruit_I2CDevice*>(intf_ptr);
     if (i2c_dev && !i2c_dev->write_then_read(&reg_addr, 1, reg_data, len))
       return 1;
@@ -90,7 +92,7 @@ class BMP390 {
                           uint32_t len, void *intf_ptr) {
     auto* i2c_dev = reinterpret_cast<Adafruit_I2CDevice*>(intf_ptr);
     if (i2c_dev && !i2c_dev->write((uint8_t *)reg_data, len, true,
-                                   &reg_addr, 1))
+                                  &reg_addr, 1))
       return 1;
     return 0;
   }
@@ -115,6 +117,7 @@ File tpa_log = File();
 File wind_log = File();
 File accelerometer_log = File();
 File ens_log = File();
+File scd_log = File();
 // LoRa radio
 RH_RF95 rf95(RF95_CS, RF95_INT);
 bool radio_ok = false;
@@ -128,7 +131,10 @@ Adafruit_LSM6DSOX sox;
 bool accelerometer_ok = false;
 //ens160
 ScioSense_ENS160      ens160(ENS160_I2CADDR_1);
-
+//CO2
+SensirionI2cScd4x scd41;
+static int16_t error;
+bool CO2_setup_error = false;
 
 /**************************
  *  Forward declarations  *
@@ -156,7 +162,8 @@ typedef enum {
   TEMPERATURE_PRESSURE_ALTITUDE,
   WIND_SPEED,
   ACCELEROMETER,
-  ENS
+  ENS,
+  SCD
 } SensorType;
 
 struct SensorInfo {
@@ -245,12 +252,39 @@ struct Ens {
       return pack(tvoc, message);
     }
 };
+struct Scd {
+  uint16_t co2_ppm; //ppm
+  float humidity; //[RH]
+
+  static inline const SensorInfo info{"co2", {"CO2 [ppm]", "Humidity [RH]"}};
+  bool read(SensirionI2cScd4x& co2_sensor1) {
+    bool dataReady = false;
+    float co2_temperature = 0.0;
+    if (NO_ERROR == scd41.getDataReadyStatus(dataReady) and dataReady) {
+      scd41.readMeasurement(co2_ppm, co2_temperature, humidity);
+      return true;
+    }
+    return false;
+  }
+  std::string as_string() const {
+    auto e = float_to_string(co2_ppm);
+    auto k = float_to_string(humidity);
+    return e + "\t" + k;
+  }
+  size_t add_to_radio_message(uint8_t *message) {
+    size_t size = 0;
+    size += pack(co2_ppm, message+size);
+    size += pack(humidity, message+size);
+    return size;
+  }
+};
 
 union SensorValue {
   TemperaturePressureAltitude tpa;
   Wind wind;
   Accelerometer accelerometer;
   Ens ens;
+  Scd scd;
 };
 
 struct SensorMeasurement {
@@ -269,6 +303,8 @@ struct SensorMeasurement {
         return Accelerometer::info;
       case ENS:
         return Ens::info;
+      case SCD:
+        return Scd::info;
       default:
         return undefined;
     }
@@ -302,6 +338,9 @@ struct SensorMeasurement {
         break;
       case ENS:
         size += value.ens.add_to_radio_message(message+size);
+        break;
+      case SCD:
+        size += value.scd.add_to_radio_message(message+size);
         break;
     }
     return size;
@@ -386,6 +425,7 @@ void write_to_sd_card() {
   bool seen_wind = false;
   bool seen_accelerometer = false;
   bool seen_ens = false;
+  bool seen_scd = false;
 
   while (xQueueReceive(sd_card_queue, &measurement, pdMS_TO_TICKS(5)) == pdPASS) {
     measurements.push_back(measurement);
@@ -413,7 +453,14 @@ void write_to_sd_card() {
       case ENS:
         if (ens_log) {
           ens_log.printf("%s\t%s\n", timestamp.c_str(), m.value.ens.as_string().c_str());
+          seen_ens = true;
         }
+      case SCD:
+        if (scd_log) {
+          ens_log.printf("%s\t%s\n", timestamp.c_str(), m.value.scd.as_string().c_str());
+          seen_scd = true;
+        }
+
     }
   }
   if (seen_tpa) {
@@ -428,6 +475,9 @@ void write_to_sd_card() {
   if (seen_ens) {
     ens_log.flush();
   }
+  if (seen_scd) {
+    scd_log.flush();
+  }
   unsigned long finish = micros();
   Serial.printf("Writing %d measurement(s) to SD card took %d us.\n", measurements.size(), finish - start);
 }
@@ -438,6 +488,7 @@ void update_tft() {
   static Wind wind{NAN};
   static Accelerometer accelerometer{NAN};
   static Ens ens{0};
+  static Scd scd{0, NAN};
   unsigned long start = micros();
   static char* blank_line = "                    ";
 
@@ -454,8 +505,9 @@ void update_tft() {
         break;
       case ENS:
         ens = measurement.value.ens;
-        Serial.println("EEEEEEEEEEEEEEENNNNNNNNNNNNNNNNNSSSSSSSSSSSSSSSSSSS");
         break;
+      case SCD:
+        scd = measurement.value.scd;
     }
   }
   tft.setCursor(0, 0);
@@ -463,6 +515,7 @@ void update_tft() {
   tft.printf("%5.1f m/s          \n", wind.speed);
   tft.printf("%5.2f g          \n", accelerometer.acceleration);
   tft.printf("%5u ppb          \n", ens.tvoc);
+  tft.printf("%5u ppb %2.2f MS          \n", scd.co2_ppm, scd.humidity);
   
   unsigned long finish = micros();
   Serial.printf("Updating TFT took %d us.\n", finish - start);
@@ -494,10 +547,10 @@ void send_radio_message() {
       case ENS:
         measurements_ens.push_back(m);
         break;
-/*      case CO2:
+      case SCD:
         measurements_co2.push_back(m);
         break;
-      case GPS:
+      /*case GPS:
         measurements_gps.push_back(m);
         break;*/
     }
@@ -578,6 +631,7 @@ void task0(void *parameters) {
   uint32_t bmp2_timer = start;
   uint32_t accelerometer_timer = start;
   uint32_t ens_timer = start;
+  uint32_t scd_timer = start;
   uint32_t now;
   float bmp1_recent_pressure = 0.0;
   SensorMeasurement measurement;
@@ -586,7 +640,8 @@ void task0(void *parameters) {
   auto &wind = measurement.value.wind;
   auto &accelerometer = measurement.value.accelerometer;
   auto &ens = measurement.value.ens;
- 
+  auto &scd = measurement.value.scd;
+
   while (true) {
     now = millis();
     std::string now_str = timestamp_to_string(now);
@@ -607,16 +662,19 @@ void task0(void *parameters) {
         Serial.printf("%s BMP1 %s\n", now_str.c_str(), tpa.as_string().c_str());
       }
     } else if (now >= bmp2_timer) {
-      bmp2_timer += 300;
+      bmp2_timer += 200;
       if (tpa.read(bmp2)) {
         measurement.type = WIND_SPEED;
         measurement.timestamp = now;
-        wind.speed = sqrt(2*(bmp1_recent_pressure - tpa.pressure)/AIR_DENSITY);
+        if (tpa.pressure < bmp1_recent_pressure)
+          wind.speed = sqrt(2*(bmp1_recent_pressure - tpa.pressure)/AIR_DENSITY);
+        else
+          wind.speed = 0.0;
         measurement.add_to_all_queues();
         Serial.printf("%s WIND %s\n", now_str.c_str(), wind.as_string().c_str());
       }
     } else if (now >= accelerometer_timer && accelerometer_ok) {
-      accelerometer_timer += 200;
+      accelerometer_timer += 195;
       if (accelerometer.read(sox)) {
         measurement.type = ACCELEROMETER;
         measurement.timestamp = now;
@@ -631,6 +689,14 @@ void task0(void *parameters) {
         measurement.add_to_all_queues();
         Serial.printf("%s ENS %s\n", now_str.c_str(), ens.as_string().c_str());
       }
+    } else if (now >= scd_timer) {
+        scd_timer += 5000;
+        if (scd.read(scd41)) {
+          measurement.type = SCD;
+          measurement.timestamp = now;
+          measurement.add_to_all_queues();
+          Serial.printf("%s ENS %s\n", now_str.c_str(), scd.as_string().c_str());
+        }
     }
   }
 }
@@ -649,6 +715,8 @@ void task1(void *parameters) {
   auto &tpa = measurement.value.tpa;
   auto &wind = measurement.value.wind;
   auto &accelerometer = measurement.value.accelerometer;
+  auto &ens = measurement.value.ens;
+  auto &scd = measurement.value.scd;
 
   while (true) {
     now = millis();
@@ -689,6 +757,7 @@ void setup() {
       wind_log = initialize_log_file(Wind::info);
       accelerometer_log = initialize_log_file(Accelerometer::info);
       ens_log = initialize_log_file(Ens::info);
+      scd_log = initialize_log_file(Scd::info);
     } else {
       Serial.println("SD card FAILED");
     }
@@ -701,6 +770,7 @@ void setup() {
     setup_sox();
     setup_lora();
     setup_ens();
+    setup_scd();
 
     if (bmp1.initialize())
       Serial.printf("BMP390 (1) init success\n");
@@ -744,6 +814,28 @@ void setup_ens() {
   Serial.println(ens160.available() ? "done." : "failed!");
   ens160.setMode(ENS160_OPMODE_STD);
 }
+
+void setup_scd() {
+  scd41.begin(Wire, SCD41_I2C_ADDR_62);
+  delay(50);
+
+  error = scd41.wakeUp();
+  if (error != NO_ERROR)
+    CO2_setup_error = true;
+  error = scd41.stopPeriodicMeasurement();
+  if (error != NO_ERROR)
+    CO2_setup_error = true;
+  error = scd41.reinit();
+  if (error != NO_ERROR)
+    CO2_setup_error = true;
+  error = scd41.startPeriodicMeasurement();
+  if (error != NO_ERROR)
+    CO2_setup_error = true;
+  if (CO2_setup_error) {
+    Serial.println("NO CO2");
+    }
+}
+
 void setup_lora() {
   pinMode(RF95_RST, OUTPUT);
   digitalWrite(RF95_RST, HIGH);
