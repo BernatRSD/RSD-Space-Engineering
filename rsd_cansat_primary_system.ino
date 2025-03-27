@@ -468,6 +468,7 @@ void update_tft() {
   Serial.printf("Updating TFT took %d us.\n", finish - start);
 }
 
+
 void send_radio_message() {
   uint8_t message[RH_RF95_MAX_MESSAGE_LEN] = {0};
   uint16_t size = 0;
@@ -490,10 +491,10 @@ void send_radio_message() {
       case ACCELEROMETER:
         measurements_accelerometer.push_back(m);
         break;
-/*      case ENS:
+      case ENS:
         measurements_ens.push_back(m);
         break;
-      case CO2:
+/*      case CO2:
         measurements_co2.push_back(m);
         break;
       case GPS:
@@ -503,7 +504,7 @@ void send_radio_message() {
   }
   if (phase == 0 || phase == 1) {
     if(measurements_bmp.size() >= 3) {
-      message[size] = 3; size++;//03 tízes helyiérték:0 - 0-ás számú szenzor adata
+      message[size] = 3; size++;//03: tízes helyiérték:0 - 0-ás számú szenzor adata, egyes helyiérték:3 - 3-szor
       size += measurements_bmp[(measurements_bmp.size() / 3) - 1].add_to_radio_message(message);
       size += measurements_bmp[((measurements_bmp.size() / 3) * 2) - 1].add_to_radio_message(message);
       size += measurements_bmp[measurements_bmp.size() - 1].add_to_radio_message(message);
@@ -520,19 +521,51 @@ void send_radio_message() {
       size += measurements_accelerometer[(measurements_accelerometer.size() / 2) - 1].add_to_radio_message(message);
       size += measurements_accelerometer[measurements_accelerometer.size() - 1].add_to_radio_message(message);
     } else if(measurements_accelerometer.size()==1) {
-      message[size]=22;  size++;
+      message[size]=21;  size++;
       size += measurements_accelerometer[measurements_accelerometer.size() - 1].add_to_radio_message(message);
     }
     if(measurements_wind.size()>=1) {
-      message[size]=10; size++;
+      message[size]=11; size++;
       size += measurements_wind[measurements_wind.size()-1].add_to_radio_message(message);
+    } else {
+      if(measurements_bmp.size() >= 2) {
+        message[size] = 2; size++;
+        size += measurements_bmp[(measurements_bmp.size() / 2) - 1].add_to_radio_message(message);
+        size += measurements_bmp[measurements_bmp.size() - 1].add_to_radio_message(message);
+      } else if(measurements_bmp.size() == 1) {
+        message[size] = 1;  size++;
+        size += measurements_bmp[measurements_bmp.size() - 1].add_to_radio_message(message);
+      }
+      if(measurements_wind.size() >= 2) {
+        message[size] = 12; size++;
+        size += measurements_wind[(measurements_wind.size() / 2) - 1].add_to_radio_message(message);
+        size += measurements_wind[measurements_wind.size() - 1].add_to_radio_message(message);
+      } else if(measurements_wind.size() == 1) {
+        message[size] = 11;  size++;
+        size += measurements_wind[measurements_wind.size() - 1].add_to_radio_message(message);
+      }
+      if(measurements_co2.size()>=1) {
+        message[size]=41; size++;
+        size += measurements_co2[measurements_co2.size() - 1].add_to_radio_message(message);
+      }
+      if(measurements_gps.size()>=1) {
+        message[size]=41; size++;
+        size += measurements_gps[measurements_gps.size() - 1].add_to_radio_message(message);
+      }
+      if(measurements_ens.size() >= 2) {
+        message[size] = 12; size++;
+        size += measurements_ens[(measurements_ens.size() / 2) - 1].add_to_radio_message(message);
+        size += measurements_ens[measurements_ens.size() - 1].add_to_radio_message(message);
+      } else if(measurements_ens.size() == 1) {
+        message[size] = 11;  size++;
+        size += measurements_ens[measurements_ens.size() - 1].add_to_radio_message(message);
+      }
     }
   }
   //size += measurement.add_to_radio_message(message);
   rf95.send(message, size);
   delay(10);
   rf95.waitPacketSent();
-
 }
 
 /****************************
