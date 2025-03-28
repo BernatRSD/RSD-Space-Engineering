@@ -619,7 +619,7 @@
                     size += measurements_co2[measurements_co2.size() - 1].add_to_radio_message(message);
                   }
                   if(measurements_gps.size()>=1) {
-                    message[size]=41; size++;
+                    message[size]=51; size++;
                     size += measurements_gps[measurements_gps.size() - 1].add_to_radio_message(message);
                   }
                   if(measurements_ens.size() >= 2) {
