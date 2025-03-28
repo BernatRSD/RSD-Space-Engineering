@@ -14,6 +14,7 @@
 #include <Arduino.h>
 #include <SensirionI2cScd4x.h>
 #include <Adafruit_GPS.h>
+#include "Adafruit_MAX1704X.h"
 
 
 /*****************
@@ -37,7 +38,7 @@
 *  BMP390 Sensor  *
 *******************/
 class BMP390 {
-public:
+  public:
   BMP390(uint8_t i2c_address): i2c_address(i2c_address) {}
   bool initialize() {
     device.intf = BMP3_I2C_INTF;
@@ -82,7 +83,7 @@ public:
     //  http://www.adafruit.com/datasheets/BST-BMP180-DS000-09.pdf 
     return 44330.0 * (1.0 - pow(pressure / sea_level_pressure, 0.1903));
   }
-private:
+  private:
   struct bmp3_dev device;
   const uint8_t i2c_address;
   static int8_t i2c_read(uint8_t reg_addr, uint8_t *reg_data,
@@ -116,7 +117,7 @@ BMP390 bmp1(0x77);  // Main pressure and temperature sensor.
 BMP390 bmp2(0x76);  // Wind measurement sensor.
 float AIR_DENSITY = 1.29; //kg/m3
 float Ground_Altitude = 0.0;
-//SD
+//SD      
 bool sd_card_ok = false;
 File tpa_log = File();
 File wind_log = File();
@@ -124,6 +125,7 @@ File accelerometer_log = File();
 File ens_log = File();
 File scd_log = File();
 File gps_log = File();
+File max17_log = File();
 // LoRa radio
 RH_RF95 rf95(RF95_CS, RF95_INT);
 bool radio_ok = false;
@@ -144,6 +146,8 @@ static int16_t error;
 bool CO2_setup_error = false;
 //GPS
 Adafruit_GPS gps(&GPS_SERIAL);
+//batery monitor
+Adafruit_MAX17048 battery_monitor;
 
 /**************************
 *  Forward declarations  *
@@ -173,7 +177,8 @@ typedef enum {
   ACCELEROMETER,
   ENS,
   SCD,
-  GPS
+  GPS,
+  MAX17
 } SensorType;
 
 struct SensorInfo {
@@ -319,6 +324,30 @@ struct Gps {
     return size;
   }
 };
+struct Max17 {
+  float voltage;
+
+  static inline const SensorInfo info{"charge", {"Charge [%]"}};
+  bool read(Adafruit_MAX17048& battery_monitor) {
+    float vol = battery_monitor.cellVoltage();
+    if (!isnan(vol) and vol != 0.0) {
+      voltage = vol;
+      Serial.printf("BATTERY VOLTAGE: %2.1f V", voltage);
+      return true;
+    } else {
+      return false;
+    }
+  }
+  std::string as_string() const {
+    auto v = float_to_string(voltage);
+    return v;
+  }
+  size_t add_to_radio_message(uint8_t *message) {
+    size_t size = 0;
+    size += pack(voltage, message+size);
+    return size;
+  }
+};
 
 union SensorValue {
   TemperaturePressureAltitude tpa;
@@ -327,6 +356,7 @@ union SensorValue {
   Ens ens;
   Scd scd;
   Gps gps;
+  Max17 max17;
 };
 
 struct SensorMeasurement {
@@ -349,6 +379,8 @@ struct SensorMeasurement {
         return Scd::info;
       case GPS:
         return Gps::info;
+      case MAX17:
+        return Max17::info;
       default:
         return undefined;
     }
@@ -385,6 +417,9 @@ struct SensorMeasurement {
         break;
       case SCD:
         size += value.scd.add_to_radio_message(message+size);
+        break;
+      case MAX17:
+        size += value.max17.add_to_radio_message(message+size);
         break;
     }
     return size;
@@ -471,6 +506,7 @@ void write_to_sd_card() {
   bool seen_ens = false;
   bool seen_scd = false;
   bool seen_gps = false;
+  bool seen_max17 = false;
 
   while (xQueueReceive(sd_card_queue, &measurement, pdMS_TO_TICKS(5)) == pdPASS) {
     measurements.push_back(measurement);
@@ -510,6 +546,11 @@ void write_to_sd_card() {
           gps_log.printf("%s\t%s\n", timestamp.c_str(), m.value.gps.as_string().c_str());
           seen_gps = true;
         }
+      case MAX17:
+        if (max17_log) {
+          max17_log.printf("%s\t%s\n", timestamp.c_str(), m.value.max17.as_string().c_str());
+          seen_max17 = true;
+        }
     }
   }
   if (seen_tpa) {
@@ -530,6 +571,9 @@ void write_to_sd_card() {
   if(seen_gps) {
     gps_log.flush();
   }
+  if (seen_max17) {
+    max17_log.flush();                
+  }
   unsigned long finish = micros();
   Serial.printf("Writing %d measurement(s) to SD card took %d us.\n", measurements.size(), finish - start);
 }
@@ -542,6 +586,7 @@ void update_tft() {
   static Ens ens{0};
   static Scd scd{0, NAN};
   static Gps gps{0, 0, NAN};
+  static Max17 max17{NAN};
   unsigned long start = micros();
 
   while (xQueueReceive(tft_queue, &measurement, 0) == pdPASS) {
@@ -560,15 +605,20 @@ void update_tft() {
         break;
       case SCD:
         scd = measurement.value.scd;
+        break;
       case GPS:
         gps = measurement.value.gps;
+        break;
+      case MAX17:
+        max17 = measurement.value.max17;
+        break;
     }
   }
   tft.setCursor(0, 0);
   tft.printf("%5.1f C %7.2fm\n%5.1fhPa ", tpa.temperature, tpa.pressure, tpa.altitude);
-  tft.printf("%2.1fm/s\n%5u ppb ", wind.speed, ens.tvoc);
+  tft.printf("%2.1fm/s\n%5u pp  b ", wind.speed, ens.tvoc);
   tft.printf("%5.2fg\n phase: %u ", accelerometer.acceleration, phase);
-  tft.printf("%5u ppm %2.2f %%\nlong: %2.5f\nlant: %2.5f\n", scd.co2_ppm, scd.humidity, gps.longitude / 10000000.0, gps.latitude / 10000000.0);
+  tft.printf("%5u ppm %2.2f %% batt: %2.1fV\n%2.5f %2.5f\n", scd.co2_ppm, scd.humidity, max17.voltage, gps.longitude / 10000000.0, gps.latitude / 10000000.0);
   tft.printf("alt:   %4.2f", gps.altitude);
   
   unsigned long finish = micros();
@@ -581,7 +631,7 @@ void send_radio_message() {
   uint16_t size = 0;
   //uint8_t message_length=0;
   SensorMeasurement measurement;
-  std::vector<SensorMeasurement> measurements,measurements_bmp,measurements_wind,measurements_accelerometer,measurements_ens,measurements_co2,measurements_gps;
+  std::vector<SensorMeasurement> measurements,measurements_bmp,measurements_wind,measurements_accelerometer,measurements_ens,measurements_co2,measurements_gps, measurements_max17;
 
   while (xQueueReceive(radio_queue, &measurement, pdMS_TO_TICKS(5)) == pdPASS) {
     measurements.push_back(measurement);
@@ -607,6 +657,8 @@ void send_radio_message() {
       case GPS:
         measurements_gps.push_back(m);
         break;
+      case MAX17:
+        measurements_max17.push_back(m);
     }
   }
 
@@ -703,6 +755,7 @@ void task0(void *parameters) {
   uint32_t ens_timer = start;
   uint32_t scd_timer = start;
   uint32_t gps_timer = start;
+  uint32_t max17_timer = start;
   uint32_t now;
   float bmp1_recent_pressure = 0.0;
   float p_diff = 0.0;
@@ -714,6 +767,7 @@ void task0(void *parameters) {
   auto &ens = measurement.value.ens;
   auto &scd = measurement.value.scd;
   auto &gpss = measurement.value.gps;
+  auto &max17 = measurement.value.max17;
 
   while (true) {
     now = millis();
@@ -789,6 +843,14 @@ void task0(void *parameters) {
         measurement.add_to_all_queues();
         Serial.printf("%s GPS %s\n", now_str.c_str(), gpss.as_string().c_str());
       }
+    } else if (now >= max17_timer) {
+      max17_timer += 1000;
+      if (max17.read(battery_monitor)) {
+        measurement.type = MAX17;
+        measurement.timestamp = now;
+        measurement.add_to_all_queues();
+        Serial.printf("%s BATTERY %s\n", now_str.c_str(), max17.as_string().c_str());
+      }
     }
   }
 }
@@ -809,7 +871,8 @@ void task1(void *parameters) {
   auto &accelerometer = measurement.value.accelerometer;
   auto &ens = measurement.value.ens;
   auto &scd = measurement.value.scd;
-  auto &gps = measurement.value.scd;
+  auto &gps = measurement.value.gps;
+  auto &max17 = measurement.value.max17;
 
   while (true) {
     now = millis();
@@ -852,6 +915,8 @@ void setup() {
       accelerometer_log = initialize_log_file(Accelerometer::info);
       ens_log = initialize_log_file(Ens::info);
       scd_log = initialize_log_file(Scd::info);
+      gps_log = initialize_log_file(Gps::info);
+      max17_log = initialize_log_file(Max17::info);
     } else {
       Serial.println("SD card FAILED");
     }
@@ -866,6 +931,7 @@ void setup() {
     setup_ens();
     setup_scd();
     setup_gps();
+    setup_max17();
 
     if (bmp1.initialize())
       Serial.printf("BMP390 (1) init success\n");
@@ -951,6 +1017,11 @@ void setup_gps() {
   gps.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCONLY);
   gps.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
   gps.sendCommand(PMTK_API_SET_FIX_CTL_1HZ);
+}
+void setup_max17() {
+  if (!battery_monitor.begin()) {
+      Serial.println("Battery monitor fail!!!");
+  }
 }
 
 void setup_lora() {
