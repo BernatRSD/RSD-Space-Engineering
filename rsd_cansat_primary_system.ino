@@ -13,6 +13,7 @@
 #include "ScioSense_ENS160.h"
 #include <Arduino.h>
 #include <SensirionI2cScd4x.h>
+#include <Adafruit_GPS.h>
 
 
 /*****************
@@ -20,7 +21,7 @@
 *****************/
 #define SD_CS 10
 #define TFT_TEXT_SIZE 2
-#define SEA_LEVEL_PRESSURE 1010.0
+#define SEA_LEVEL_PRESSURE 1010.0     
 // LoRa radio
 #define RF95_INT 12
 #define RF95_CS 5
@@ -28,6 +29,9 @@
 #define RF95_FREQ_MHZ 433.0
 #define RF95_TX_POWER_DBM 14
 #define NO_ERROR 0
+//GPS
+#define GPS_BAUD_RATE 115200
+#define GPS_SERIAL Serial1
 
 /*******************
 *  BMP390 Sensor  *
@@ -119,6 +123,7 @@ File wind_log = File();
 File accelerometer_log = File();
 File ens_log = File();
 File scd_log = File();
+File gps_log = File();
 // LoRa radio
 RH_RF95 rf95(RF95_CS, RF95_INT);
 bool radio_ok = false;
@@ -137,6 +142,8 @@ ScioSense_ENS160      ens160(ENS160_I2CADDR_1);
 SensirionI2cScd4x scd41;
 static int16_t error;
 bool CO2_setup_error = false;
+//GPS
+Adafruit_GPS gps(&GPS_SERIAL);
 
 /**************************
 *  Forward declarations  *
@@ -165,7 +172,8 @@ typedef enum {
   WIND_SPEED,
   ACCELEROMETER,
   ENS,
-  SCD
+  SCD,
+  GPS
 } SensorType;
 
 struct SensorInfo {
@@ -200,7 +208,6 @@ struct TemperaturePressureAltitude {
     return size;
   }
 };
-
 struct Wind {
   float speed;
 
@@ -212,7 +219,6 @@ struct Wind {
     return pack(speed, message);
   }
 };
-
 struct Accelerometer {
   float acceleration;
 
@@ -280,6 +286,39 @@ struct Scd {
     return size;
   }
 };
+struct Gps {
+  int32_t latitude;
+  int32_t longitude;
+  float altitude;
+
+  static inline const SensorInfo info{"gps", {"Latitude [DEGRES]", "Longitude [DEGRES]"}};
+  bool read(Adafruit_GPS& gps_sensor) {
+    while(gps.read());
+    if (gps.newNMEAreceived())
+      gps.parse(gps.lastNMEA());
+    if (gps.fix) {
+      latitude = gps.latitude_fixed;
+      longitude = gps.longitude_fixed;
+      altitude = gps.altitude;
+      return true;    
+    } else {
+      return false;
+    }
+  }
+  std::string as_string() const {
+    auto lo = float_to_string(longitude);
+    auto la = float_to_string(latitude);
+    auto al = float_to_string(altitude);
+    return lo + "\t" + la + "\t" + al;
+  }
+  size_t add_to_radio_message(uint8_t *message) {
+    size_t size = 0;
+    size += pack(longitude, message+size);
+    size += pack(latitude, message+size);
+    size += pack(altitude, message+size);
+    return size;
+  }
+};
 
 union SensorValue {
   TemperaturePressureAltitude tpa;
@@ -287,6 +326,7 @@ union SensorValue {
   Accelerometer accelerometer;
   Ens ens;
   Scd scd;
+  Gps gps;
 };
 
 struct SensorMeasurement {
@@ -307,6 +347,8 @@ struct SensorMeasurement {
         return Ens::info;
       case SCD:
         return Scd::info;
+      case GPS:
+        return Gps::info;
       default:
         return undefined;
     }
@@ -428,6 +470,7 @@ void write_to_sd_card() {
   bool seen_accelerometer = false;
   bool seen_ens = false;
   bool seen_scd = false;
+  bool seen_gps = false;
 
   while (xQueueReceive(sd_card_queue, &measurement, pdMS_TO_TICKS(5)) == pdPASS) {
     measurements.push_back(measurement);
@@ -459,10 +502,14 @@ void write_to_sd_card() {
         }
       case SCD:
         if (scd_log) {
-          ens_log.printf("%s\t%s\n", timestamp.c_str(), m.value.scd.as_string().c_str());
+          scd_log.printf("%s\t%s\n", timestamp.c_str(), m.value.scd.as_string().c_str());
           seen_scd = true;
         }
-
+      case GPS:
+        if (gps_log) {
+          gps_log.printf("%s\t%s\n", timestamp.c_str(), m.value.gps.as_string().c_str());
+          seen_gps = true;
+        }
     }
   }
   if (seen_tpa) {
@@ -480,6 +527,9 @@ void write_to_sd_card() {
   if (seen_scd) {
     scd_log.flush();
   }
+  if(seen_gps) {
+    gps_log.flush();
+  }
   unsigned long finish = micros();
   Serial.printf("Writing %d measurement(s) to SD card took %d us.\n", measurements.size(), finish - start);
 }
@@ -491,8 +541,8 @@ void update_tft() {
   static Accelerometer accelerometer{NAN};
   static Ens ens{0};
   static Scd scd{0, NAN};
+  static Gps gps{0, 0, NAN};
   unsigned long start = micros();
-  static char* blank_line = "                    ";
 
   while (xQueueReceive(tft_queue, &measurement, 0) == pdPASS) {
     switch (measurement.type) {
@@ -510,14 +560,16 @@ void update_tft() {
         break;
       case SCD:
         scd = measurement.value.scd;
+      case GPS:
+        gps = measurement.value.gps;
     }
   }
   tft.setCursor(0, 0);
-  tft.printf("%5.1f C %7.2f hPa\n%5.1f m    \n", tpa.temperature, tpa.pressure, tpa.altitude);
-  tft.printf("%5.1f m/s          \n", wind.speed);
-  tft.printf("%5.2f g; phase: %u\n", accelerometer.acceleration, phase);
-  tft.printf("%5u ppb          \n", ens.tvoc);
-  tft.printf("%5u ppb %2.2f MS          \n", scd.co2_ppm, scd.humidity);
+  tft.printf("%5.1f C %7.2fm\n%5.1fhPa ", tpa.temperature, tpa.pressure, tpa.altitude);
+  tft.printf("%2.1fm/s\n%5u ppb ", wind.speed, ens.tvoc);
+  tft.printf("%5.2fg\n phase: %u ", accelerometer.acceleration, phase);
+  tft.printf("%5u ppm %2.2f %%\nlong: %2.5f\nlant: %2.5f\n", scd.co2_ppm, scd.humidity, gps.longitude / 10000000.0, gps.latitude / 10000000.0);
+  tft.printf("alt:   %4.2f", gps.altitude);
   
   unsigned long finish = micros();
   Serial.printf("Updating TFT took %d us.\n", finish - start);
@@ -552,9 +604,9 @@ void send_radio_message() {
       case SCD:
         measurements_co2.push_back(m);
         break;
-      /*case GPS:
+      case GPS:
         measurements_gps.push_back(m);
-        break;*/
+        break;
     }
   }
 
@@ -650,6 +702,7 @@ void task0(void *parameters) {
   uint32_t accelerometer_timer = start;
   uint32_t ens_timer = start;
   uint32_t scd_timer = start;
+  uint32_t gps_timer = start;
   uint32_t now;
   float bmp1_recent_pressure = 0.0;
   float p_diff = 0.0;
@@ -660,6 +713,7 @@ void task0(void *parameters) {
   auto &accelerometer = measurement.value.accelerometer;
   auto &ens = measurement.value.ens;
   auto &scd = measurement.value.scd;
+  auto &gpss = measurement.value.gps;
 
   while (true) {
     now = millis();
@@ -720,14 +774,22 @@ void task0(void *parameters) {
         Serial.printf("%s ENS %s\n", now_str.c_str(), ens.as_string().c_str());
       }
     } else if (now >= scd_timer) {
-        scd_timer += 5000;
-        if (scd.read(scd41)) {
-          measurement.type = SCD;
-          measurement.timestamp = now;
-          measurement.add_to_all_queues();
-          Serial.printf("%s ENS %s\n", now_str.c_str(), scd.as_string().c_str());
-        }
-    } 
+      scd_timer += 5000;
+      if (scd.read(scd41)) {
+        measurement.type = SCD;
+        measurement.timestamp = now;
+        measurement.add_to_all_queues();
+        Serial.printf("%s ENS %s\n", now_str.c_str(), scd.as_string().c_str());
+      }
+    } else if (now >= gps_timer) {
+      gps_timer += 900;
+      if (gpss.read(gps)) {
+        measurement.type = GPS;
+        measurement.timestamp = now;
+        measurement.add_to_all_queues();
+        Serial.printf("%s GPS %s\n", now_str.c_str(), gpss.as_string().c_str());
+      }
+    }
   }
 }
 
@@ -747,6 +809,7 @@ void task1(void *parameters) {
   auto &accelerometer = measurement.value.accelerometer;
   auto &ens = measurement.value.ens;
   auto &scd = measurement.value.scd;
+  auto &gps = measurement.value.scd;
 
   while (true) {
     now = millis();
@@ -802,6 +865,7 @@ void setup() {
     setup_lora();
     setup_ens();
     setup_scd();
+    setup_gps();
 
     if (bmp1.initialize())
       Serial.printf("BMP390 (1) init success\n");
@@ -865,6 +929,28 @@ void setup_scd() {
   if (CO2_setup_error) {
     Serial.println("NO CO2");
     }
+}
+
+void setup_gps() {
+  gps.begin(9600);
+  if (GPS_BAUD_RATE == 57600 || GPS_BAUD_RATE == 115200) {
+    if (GPS_BAUD_RATE == 57600)
+      gps.sendCommand(PMTK_SET_BAUD_57600);
+    else
+      gps.sendCommand(PMTK_SET_BAUD_115200);
+    delay(100);
+    GPS_SERIAL.end();
+    GPS_SERIAL.begin(GPS_BAUD_RATE);
+    gps.begin(GPS_BAUD_RATE);
+  } else {
+    gps.sendCommand(PMTK_SET_BAUD_9600);
+    if (GPS_BAUD_RATE != 9600) {
+      Serial.printf("Invalid GPS baud\nrate: %d\n9600 is used.\n", GPS_BAUD_RATE);
+    }
+  }
+  gps.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCONLY);
+  gps.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
+  gps.sendCommand(PMTK_API_SET_FIX_CTL_1HZ);
 }
 
 void setup_lora() {
