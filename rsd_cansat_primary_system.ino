@@ -122,6 +122,7 @@ File scd_log = File();
 RH_RF95 rf95(RF95_CS, RF95_INT);
 bool radio_ok = false;
 uint8_t phase=0;
+uint32_t phase1_enter_time = 0;
 //queue
 QueueHandle_t radio_queue;
 QueueHandle_t sd_card_queue;
@@ -219,7 +220,7 @@ struct Accelerometer {
     sensors_event_t accel, gyro, temp;
     if (sox_sensor.getEvent(&accel, &gyro, &temp)) {
       sensors_vec_t& a = accel.acceleration;
-      acceleration = sqrt(a.x*a.x+a.y*a.y+a.z*a.z) / 4.905;
+      acceleration = sqrt(a.x*a.x+a.y*a.y+a.z*a.z) / 9.807;
       return true;
     }
     return false;
@@ -513,7 +514,7 @@ void update_tft() {
   tft.setCursor(0, 0);
   tft.printf("%5.1f C %7.2f hPa\n%5.1f m    \n", tpa.temperature, tpa.pressure, tpa.altitude);
   tft.printf("%5.1f m/s          \n", wind.speed);
-  tft.printf("%5.2f g          \n", accelerometer.acceleration);
+  tft.printf("%5.2f g; phase: %u\n", accelerometer.acceleration, phase);
   tft.printf("%5u ppb          \n", ens.tvoc);
   tft.printf("%5u ppb %2.2f MS          \n", scd.co2_ppm, scd.humidity);
   
@@ -555,6 +556,17 @@ void send_radio_message() {
         break;*/
     }
   }
+
+  if(phase == 0 && measurements_bmp.size()>=1 && measurements_accelerometer.size() >= 1 && 
+        (measurements_bmp[measurements_bmp.size()-1].value.tpa.altitude>=500 || 
+        measurements_accelerometer[measurements_accelerometer.size()-1].value.accelerometer.acceleration >= 15)) {
+    phase++;
+    phase1_enter_time = millis();
+  }
+  if (phase == 1 && millis() - phase1_enter_time >= 210000) { // 3.5 min
+    phase++;
+  }
+
   if (phase == 0 || phase == 1) {
     if(measurements_bmp.size() >= 3) {
       message[size] = 3; size++;//03: tízes helyiérték:0 - 0-ás számú szenzor adata, egyes helyiérték:3 - 3-szor
@@ -673,8 +685,8 @@ void task0(void *parameters) {
         measurement.add_to_all_queues();
         Serial.printf("%s WIND %s\n", now_str.c_str(), wind.as_string().c_str());
       }
-    } else if (now >= accelerometer_timer && accelerometer_ok) {
-      accelerometer_timer += 195;
+    } else if (now >= (accelerometer_timer + 200) && accelerometer_ok) {
+      accelerometer_timer = now;
       if (accelerometer.read(sox)) {
         measurement.type = ACCELEROMETER;
         measurement.timestamp = now;
@@ -728,6 +740,7 @@ void task1(void *parameters) {
       sd_card_timer += 2000;
       write_to_sd_card();
     } else if (now >= radio_timer && radio_ok) {
+      Serial.printf("phase: %u\n", phase);
       if (phase == 0) { 
         radio_timer += 1000;
       } else if (phase == 1) {
