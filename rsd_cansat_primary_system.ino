@@ -674,7 +674,7 @@ void send_radio_message() {
 
   if (phase == 0 || phase == 1) {
     if(measurements_bmp.size() >= 3) {
-      message[size] = 3; size++;//03: tízes helyiérték:0 - 0-ás számú szenzor adata, egyes helyiérték:3 - 3-szor
+      message[size] = 3; size++; //03: tízes helyiérték:0 - 0-ás számú szenzor adata, egyes helyiérték:3 - 3-szor
       size += measurements_bmp[(measurements_bmp.size() / 3) - 1].add_to_radio_message(message);
       size += measurements_bmp[((measurements_bmp.size() / 3) * 2) - 1].add_to_radio_message(message);
       size += measurements_bmp[measurements_bmp.size() - 1].add_to_radio_message(message);
@@ -789,7 +789,7 @@ void task0(void *parameters) {
         Serial.printf("%s BMP1 %s\n", now_str.c_str(), tpa.as_string().c_str());
         if (now >= 5000 && 0.0 == Ground_Altitude) {
           Ground_Altitude = tpa.altitude;
-          Serial.print("Ground_altitude: "); Serial.println(Ground_Altitude); Serial.print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+          Serial.print("Ground_altitude: "); Serial.println(Ground_Altitude);
         }
       }
     } else if (now >= bmp2_timer) {
@@ -808,7 +808,7 @@ void task0(void *parameters) {
         Serial.print("pressure difference: "); Serial.println(p_diff);
         if (p_diff == 0.0 && now > 5000) {
           p_diff = tpa.pressure - bmp1_recent_pressure;
-          Serial.print("p_diff: "); Serial.println(p_diff); Serial.print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+          Serial.print("p_diff: "); Serial.println(p_diff);
         }
       }
     } else if (now >= (accelerometer_timer + 200) && accelerometer_ok) {
@@ -886,11 +886,11 @@ void task1(void *parameters) {
     } else if (now >= radio_timer && radio_ok) {
       Serial.printf("phase: %u\n", phase);
       if (phase == 0) { 
-        radio_timer += 1000;
+        radio_timer += 980;
       } else if (phase == 1) {
         radio_timer=now;
       } else {
-        radio_timer += 5000;
+        radio_timer += 4980;
       }
       send_radio_message();
     } else if (now >= tft_timer) {
