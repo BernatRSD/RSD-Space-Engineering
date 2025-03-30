@@ -1,10 +1,10 @@
-void setup() {
-  // put your setup code here, to run once:
+// Have only one define uncommented below, the one you want to build.
 
-}
+// Select "Adafruit Feather ESP32-S3 Reverse TFT" board for
+// CANSAT_PRIMARY_SYSTEM and GROUND_STATION,
+// "Adafruit Feather RP2040 RFM" for CANSAT_SECONDARY_SYSTEM.
 
-void loop() {
-  // put your main code here, to run repeatedly:
-
-}
-
+// #define CANSAT_PRIMARY_SYSTEM
+// #define CANSAT_SECONDARY_SYSTEM
+#define GROUND_STATION
+// #define GROUND_STATION_DEBUG
