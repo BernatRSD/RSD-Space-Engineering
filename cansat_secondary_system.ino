@@ -1,11 +1,7 @@
+/****************************************
+ *  Board: Adafruit Feather RP2040 RFM  *
+ ****************************************/
 #ifdef CANSAT_SECONDARY_SYSTEM
-
-#include <optional>
-#include <sstream>
-
-#include <SPI.h>
-#include <Wire.h>
-#include <Arduino.h>
 
 #include "rsd_bmp390.h"
 #include "rsd_environment.h"
@@ -16,32 +12,18 @@
 #include "rsd_sensors.h"
 
 
-// #define RSD_DEBUG
-
-BMP390 bmp(0x77);
+/**********************
+ *  Global variables  *
+ **********************/
+BMP390 bmp;
 RH_RF95 rf95(RF95_CS, RF95_INT);
 bool radio_ok = false;
 queue_t radio_queue;
 
 
-
-/****************************
- *  Task Running on Core 1  *
- ****************************/
-void task1() {
-  uint32_t now;
-  uint32_t radio_timer = millis();
-
-  while (true) {
-    now = millis();
-    if (radio_ok && now > radio_timer) {
-      radio_timer += 1000;
-      send_radio_message();
-    }
-  }
-}
-
-
+/***********
+ *  Setup  *
+ ***********/
 void setup() {
   #ifdef RSD_DEBUG
   Serial.begin(115200);
@@ -52,20 +34,24 @@ void setup() {
   Wire.begin();
   Wire.setClock(400000);
 
-  setup_bmp();
+  bmp.initialize();
+
   radio_ok = setup_lora(
     rf95, RF95_RST, RF95_FREQ_MHZ,
     RF95_TX_POWER_DBM, RF95_SPREADING_FACTOR,
     RF95_BANDWIDTH_HZ, RF95_CODING_RATE);
 
+  // The built-in red LED will be ON while the radio is transmitting.
   pinMode(LED_BUILTIN, OUTPUT);
 
-  // Initialize the queue to hold up to 10 integers
   queue_init(&radio_queue, sizeof(SensorMeasurement), 100);
-
-  multicore_launch_core1(task1);
 }
 
+
+/*****************************
+ *  Task Running on Core 0:  *
+ *  BMP Measurement          *
+ *****************************/
 void loop() {
   static uint32_t bmp_timer = millis();
   uint32_t now = millis();
@@ -85,21 +71,47 @@ void loop() {
   }
 }
 
+
+/*****************************
+ *  Task Running on Core 1:  *
+ *  Radio transmission       *
+ *****************************/
+void loop1() {
+  static uint32_t radio_timer = millis();
+  uint32_t now = millis();
+
+  if (radio_ok && now > radio_timer) {
+    radio_timer += 1000;
+    send_radio_message();
+  }
+}
+
+
+/************************
+ *  Send Radio Message  *
+ ************************/
 void send_radio_message() {
   uint8_t message[RH_RF95_MAX_MESSAGE_LEN] = {0};
   SensorMeasurement measurement;
   std::vector<SensorMeasurement> measurements;
   static uint16_t transmission_id = 1;
+  static uint16_t transmission_duration = 0;
 
+  // Send transmission counter and previous transmission
+  // duration as the first measurement package.
   measurement.type = RADIO_TRANSMISSION;
   measurement.timestamp = millis();
   measurement.value.radio_transmission.id = transmission_id;
+  measurement.value.radio_transmission.previous_transmission_duration = transmission_duration;
   transmission_id++;
   measurements.push_back(measurement);
+
+  // Get all measurements from the queue.
   while (queue_try_remove(&radio_queue, &measurement)) {
     measurements.push_back(measurement);
   }
 
+  // Create the transmission payload.
   uint16_t size = 0;
   uint16_t sent_measurement_counter = 0;
   for (const auto& m : measurements) {
@@ -108,30 +120,23 @@ void send_radio_message() {
     size += m.add_to_radio_message(message+size);
     sent_measurement_counter++;
   }
+
+  // Switch built-in red LED on.
   digitalWrite(LED_BUILTIN, HIGH);
+
+  // Radio transmission.
   uint32_t start = millis();
   rf95.send(message, size);
   delay(10);
   rf95.waitPacketSent();
-  uint32_t finish = millis();
-  digitalWrite(LED_BUILTIN, LOW);
+  transmission_duration = static_cast<uint16_t>(millis() - start);
+  digitalWrite(LED_BUILTIN, LOW);  // Switch LED off.
+  
   #ifdef RSD_DEBUG
-  Serial.printf("Message %d: Sending %u/%u measurements in %u bytes took %u ms.\n",
-                transmission_id, sent_measurement_counter,
-                measurements.size(), size, finish-start);
+  Serial.printf("Message %d: Sending %u bytes, %u measurements out of %u queued took %u ms.\n",
+                transmission_id, size, sent_measurement_counter,
+                measurements.size(), transmission_duration);
   #endif
-}
-
-void setup_bmp() {
-  if (bmp.initialize()) {
-    #ifdef RSD_DEBUG
-    Serial.printf("BMP390 init success\n");
-    #endif
-  } else {
-    #ifdef RSD_DEBUG
-    Serial.printf("BMP390 init failed\n");
-    #endif
-  }
 }
 
 #endif

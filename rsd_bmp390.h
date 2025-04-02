@@ -5,7 +5,8 @@
 #include "bmp3.h"
 
 class BMP390 {
-  public:
+ public:
+  BMP390(): i2c_address(0x77) {}
   BMP390(uint8_t i2c_address): i2c_address(i2c_address) {}
   bool initialize() {
     device.intf = BMP3_I2C_INTF;
@@ -14,7 +15,7 @@ class BMP390 {
     device.write = i2c_write;
     device.delay_us = delay_microseconds;
     if (bmp3_init(&device) != BMP3_OK)
-      return false;
+      return init_failed();
     device.settings.press_en = BMP3_ENABLE;
     device.settings.temp_en = BMP3_ENABLE;
     device.settings.odr_filter.press_os = BMP3_OVERSAMPLING_32X;
@@ -25,11 +26,11 @@ class BMP390 {
       BMP3_SEL_PRESS_OS | BMP3_SEL_TEMP_OS |
       BMP3_SEL_IIR_FILTER | BMP3_SEL_ODR;
     if (bmp3_set_sensor_settings(settings, &device) != BMP3_OK)
-      return false;
+      return init_failed();
     device.settings.op_mode = BMP3_MODE_NORMAL;
     if (bmp3_set_op_mode(&device) != BMP3_OK)
-      return false;
-    return true;
+      return init_failed();
+    return init_success();
   }
   // Set the temperature in °C and pressure in hPa and return true
   // if the device is working and new data is available. Otherwise
@@ -50,9 +51,22 @@ class BMP390 {
     //  http://www.adafruit.com/datasheets/BST-BMP180-DS000-09.pdf 
     return 44330.0 * (1.0 - pow(pressure / sea_level_pressure, 0.1903));
   }
-  private:
-  struct bmp3_dev device;
+
+ private:
   const uint8_t i2c_address;
+  struct bmp3_dev device;
+  bool init_success() {
+    #ifdef RSD_DEBUG
+    Serial.printf("BMP390 @ 0x%02X INIT OK\n", i2c_address);
+    #endif
+    return true;
+  }
+  bool init_failed() {
+    #ifdef RSD_DEBUG
+    Serial.printf("BMP390 @ 0x%02X INIT FAILED\n", i2c_address);
+    #endif
+    return false;
+  }
   static int8_t i2c_read(uint8_t reg_addr, uint8_t *reg_data,
                         uint32_t len, void *intf_ptr) {
     auto* i2c_dev = reinterpret_cast<Adafruit_I2CDevice*>(intf_ptr);

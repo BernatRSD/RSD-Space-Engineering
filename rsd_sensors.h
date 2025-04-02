@@ -2,7 +2,7 @@
 #define RSD_SENSORS
 
 #include <Adafruit_GPS.h>
-#include <Adafruit_LSM6DSOX.h>
+#include <Adafruit_LSM6DSO32.h>
 #include <Adafruit_MAX1704X.h>
 #include <ScioSense_ENS160.h>
 #include <SensirionI2cScd4x.h>
@@ -83,7 +83,7 @@ struct Accelerometer {
   float acceleration;
 
   static inline const SensorInfo info{"accel", {"Acceleration [g]"}};
-  bool read(Adafruit_LSM6DSOX& sox_sensor) {
+  bool read(Adafruit_LSM6DSO32& sox_sensor) {
     sensors_event_t accel, gyro, temp;
     if (sox_sensor.getEvent(&accel, &gyro, &temp)) {
       sensors_vec_t& a = accel.acceleration;
@@ -181,6 +181,7 @@ struct Max17 {
 
 struct RadioTransmission {
   uint16_t id;
+  uint16_t previous_transmission_duration;
 
   static inline const SensorInfo info{"transmission", {"Radio transmission id"}};
   std::string as_string() const {
@@ -362,7 +363,23 @@ struct SensorMeasurement {
     }
     return size;
   }
-
 };
+
+BaseType_t add_measurement_to_queue(const SensorMeasurement& measurement,
+                                    QueueHandle_t& queue) {
+  return xQueueSendToBack(queue, &measurement, pdMS_TO_TICKS(100));
+}
+
+BaseType_t add_measurement_to_queues(const SensorMeasurement& measurement,
+                                    std::vector<QueueHandle_t> queues) {
+  BaseType_t result = pdPASS;
+  for (auto& queue : queues)
+    if (add_measurement_to_queue(measurement, queue) != pdPASS)
+     result = pdFAIL;
+  return result;
+}
+
+
+
 
 #endif

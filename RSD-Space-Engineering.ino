@@ -1,10 +1,24 @@
-// Have only one define uncommented below, the one you want to build.
-
-// Select "Adafruit Feather ESP32-S3 Reverse TFT" board for
-// CANSAT_PRIMARY_SYSTEM and GROUND_STATION,
-// "Adafruit Feather RP2040 RFM" for CANSAT_SECONDARY_SYSTEM.
+/*********************************************************
+ *  Select which system to build by uncommenting one of  *
+ *  the defines below.                                   *
+ *                                                       *
+ *  Board for CANSAT_PRIMARY_SYSTEM and GROUND_STATION:  *
+ *  Adafruit Feather ESP32-S3 Reverse TFT                *
+ *                                                       *
+ *  Board for CANSAT_SECONDARY_SYSTEM:                   *
+ *  Adafruit Feather RP2040 RFM                          *
+ * *******************************************************/
 
 // #define CANSAT_PRIMARY_SYSTEM
 // #define CANSAT_SECONDARY_SYSTEM
 #define GROUND_STATION
-// #define GROUND_STATION_DEBUG
+
+
+
+/***********************************************************
+ *  TESTING & DEBUGGING                                    *
+ *  Uncomment the define below for debugging over Serial.  *
+ *  COMMENT OUT for the competition!                       *
+ ***********************************************************/
+
+#define RSD_DEBUG

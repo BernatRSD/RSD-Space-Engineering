@@ -5,7 +5,7 @@
 #include <SPI.h>
 
 #define SD_CHIP_SELECT 10
-#define SD_FREQUENCY 25  // MHz
+#define SD_FREQUENCY 8  // MHz
 
 SdFat sd;
 bool sd_card_ok = false;

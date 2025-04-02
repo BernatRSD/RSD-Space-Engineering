@@ -1,11 +1,8 @@
 #ifdef GROUND_STATION
 
-// Uncomment for printing debug info over Serial.
-#define RSD_DEBUG
-
 // Select frequency for ground station.
-// #define IS_433_MHZ
-#define IS_868_MHZ
+#define IS_433_MHZ
+// #define IS_868_MHZ
 
 #include "rsd_helper.h"
 #include "rsd_lora.h"
@@ -32,64 +29,6 @@ bool radio_ok = false;
 QueueHandle_t sd_card_queue;
 QueueHandle_t tft_queue;
 
-/****************************
-*  Task Running on Core 0  *
-****************************/
-void task0(void *parameters) {
-  // Updates the display and writes to SD card.
-
-  uint32_t idle_timer = millis();
-  uint32_t tft_timer = millis();
-  uint32_t sd_card_timer = millis();
-  uint32_t now;
-  SensorMeasurement measurement;
-
-  while (true) {
-    now = millis();
-    std::string now_str = timestamp_to_string(now);
-    if (now >= idle_timer) {
-      idle_timer += 1000;
-      #ifdef RSD_DEBUG
-      Serial.printf("%s TASK0 IDLE\n", now_str.c_str());
-      #endif
-      yield();  // This lets the system run its own tasks. Otherwise,
-                // the EPS32-S3 will restart after a few seconds.
-    } else if (now >= tft_timer) {
-      tft_timer += 200;
-      update_tft();
-    } else if (now >= sd_card_timer) {
-      sd_card_timer += 5000;
-      std::vector<SensorMeasurement> measurements;
-      while (xQueueReceive(sd_card_queue, &measurement, pdMS_TO_TICKS(5)) == pdPASS)
-        measurements.push_back(measurement);
-      write_to_sd_card(measurements);
-    }
-  }
-}
-
-/****************************
-*  Task Running on Core 1  *
-****************************/
-void task1(void *parameters) {
-  // Listens to radio messages.
-
-  uint32_t idle_timer = millis();
-  uint32_t now;
-
-  while (true) {
-    now = millis();
-    if (now >= idle_timer) {
-      idle_timer += 1000;
-      #ifdef RSD_DEBUG
-      Serial.printf("%s TASK1 IDLE\n", timestamp_to_string(now).c_str());
-      #endif
-      yield();  // This lets the system run its own tasks. Otherwise,
-                // the EPS32-S3 will restart after a few seconds.
-    }
-    receive_transmission();
-  }
-}
-
 
 void setup() {
   #ifdef RSD_DEBUG
@@ -97,8 +36,7 @@ void setup() {
   for (int i = 0; i < 3; i++)
     if (!Serial) delay(1000);
   if (Serial) Serial.println("Serial INIT OK");
-  Serial.print("RESET REASON: ");
-  Serial.println(esp_reset_reason());
+  Serial.printf("RESET REASON: %d\n", esp_reset_reason());
   #endif
 
   sd_card_queue = xQueueCreate(200, sizeof(SensorMeasurement));
@@ -112,6 +50,7 @@ void setup() {
     tft.println("LoRa INIT OK");
   else
     tft.println("LoRa INIT FAILED");
+
   // Initialize SD card.
   if (initialize_log_files({TEMPERATURE_PRESSURE_ALTITUDE, RADIO_TRANSMISSION, RADIO_RECEPTION})) {
     tft.println("SD card INIT OK");
@@ -126,16 +65,24 @@ void setup() {
   }
   delay(1000);
   clear_tft(tft);
-
-  xTaskCreatePinnedToCore(task0, "task0", 8192, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(task1, "task1", 8192, NULL, 1, NULL, 1);
-
 }
 
-void loop() {}
+void loop() {
+  SensorMeasurement measurement;
+  std::vector<SensorMeasurement> measurements;
+
+  receive_transmission();
+  yield();
+  update_tft();
+  yield();
+  while (xQueueReceive(sd_card_queue, &measurement, pdMS_TO_TICKS(5)) == pdPASS)
+    measurements.push_back(measurement);
+  write_to_sd_card(measurements);
+  yield();
+}
 
 bool receive_transmission() {
-  if (rf95.waitAvailableTimeout(1000)) {
+  if (rf95.waitAvailableTimeout(1500)) {
     uint8_t message[RH_RF95_MAX_MESSAGE_LEN];
     uint8_t len = sizeof(message);
     if (rf95.recv(message, &len)) {
@@ -178,7 +125,6 @@ void update_tft() {
   #ifdef RSD_DEBUG
   unsigned long start = micros();
   #endif
-
   while (xQueueReceive(tft_queue, &measurement, 5) == pdPASS) {
     switch (measurement.type) {
       case TEMPERATURE_PRESSURE_ALTITUDE:
