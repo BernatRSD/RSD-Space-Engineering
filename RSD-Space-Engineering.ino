@@ -10,15 +10,14 @@
  * *******************************************************/
 
 // #define CANSAT_PRIMARY_SYSTEM
-// #define CANSAT_SECONDARY_SYSTEM
-#define GROUND_STATION
-
+#define CANSAT_SECONDARY_SYSTEM
+// #define GROUND_STATION
 
 
 /***********************************************************
  *  TESTING & DEBUGGING                                    *
  *  Uncomment the define below for debugging over Serial.  *
- *  COMMENT OUT for the competition!                       *
+ *  COMMENT OUT for real flight!                           *
  ***********************************************************/
 
-#define RSD_DEBUG
+// #define RSD_DEBUG

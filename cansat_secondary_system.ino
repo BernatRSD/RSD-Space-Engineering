@@ -27,7 +27,9 @@ queue_t radio_queue;
 void setup() {
   #ifdef RSD_DEBUG
   Serial.begin(115200);
-  while (!Serial) delay(10);
+  for (int i = 0; i < 3; i++)
+    if (!Serial) delay(1000);
+  if (Serial) Serial.println("Serial INIT OK");
   #endif
 
   // Initialize I2C communication.
@@ -131,7 +133,7 @@ void send_radio_message() {
   rf95.waitPacketSent();
   transmission_duration = static_cast<uint16_t>(millis() - start);
   digitalWrite(LED_BUILTIN, LOW);  // Switch LED off.
-  
+
   #ifdef RSD_DEBUG
   Serial.printf("Message %d: Sending %u bytes, %u measurements out of %u queued took %u ms.\n",
                 transmission_id, size, sent_measurement_counter,

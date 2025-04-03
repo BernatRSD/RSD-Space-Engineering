@@ -1,8 +1,11 @@
+/**************************************************
+ *  Board: Adafruit Feather ESP32-S3 Reverse TFT  *
+ **************************************************/
 #ifdef CANSAT_PRIMARY_SYSTEM
 
-// #ifndef ADAFRUIT_FEATHER_ESP32S3_REVERSETFT
-// #error "Select Adafruit Feather ESP32-S3 Reverse TFT board for the primary system!"
-// #endif
+#ifndef ARDUINO_ADAFRUIT_FEATHER_ESP32S3_REVTFT
+#error "Select Adafruit Feather ESP32-S3 Reverse TFT board for the primary system!"
+#endif
 
 #include "rsd_bmp390.h"
 #include "rsd_environment.h"
@@ -133,13 +136,6 @@ void send_radio_message() {
   Serial.printf("*** Reading %d measurement(s) from the radio queue took %.3f ms\n", measurements.size(), (micros() - start) * 0.001);
   #endif
 
-  measurement.type = RADIO_TRANSMISSION;
-  measurement.timestamp = millis();
-  measurement.value.radio_transmission.id = transmission_id++;
-  measurement.value.radio_transmission.previous_transmission_duration = transmission_duration;
-  measurements.push_back(measurement);
-  add_measurement_to_queue(measurement, sd_card_queue);
-  // Send radio message counter.
   for (const auto& measurement : measurements) {
     switch (measurement.type) {
       case TEMPERATURE_PRESSURE_ALTITUDE:
@@ -169,69 +165,71 @@ void send_radio_message() {
   Serial.printf("*** Reading and processing radio queue took %.3f ms\n", (micros() - start) * 0.001);
   #endif
 
+  // Radio transmission message
+  measurement.type = RADIO_TRANSMISSION;
+  measurement.timestamp = millis();
+  measurement.value.radio_transmission.id = transmission_id++;
+  measurement.value.radio_transmission.previous_transmission_duration = transmission_duration;
+  #ifdef RSD_DEBUG
+  Serial.printf("************************* Radio transmission id: %u duration: %u ms\n", transmission_id, transmission_duration);
+  #endif
+  size += measurement.add_to_radio_message(message+size);
+  add_measurement_to_queue(measurement, sd_card_queue);
+  
   size_t bmp_size = meas_bmp.size();
   size_t acc_size = meas_acc.size();
   size_t wind_size = meas_wind.size();
   size_t gps_size = meas_gps.size();
   size_t ens_size = meas_ens.size();
-  if(phase == 0 && bmp_size >= 2 && acc_size >= 1 && 
-        (meas_bmp[bmp_size-1].value.tpa.altitude >= meas_bmp[bmp_size-2].value.tpa.altitude + 3.0|| 
-        meas_acc[acc_size-1].value.accelerometer.acceleration >= 10.0)) {
-    phase++;
-    phase1_enter_time = millis();
-  }
-  if (phase == 1 && millis() - phase1_enter_time >= 210000) { // 3.5 min
-    phase++;
-  }
 
   if (phase == 0 || phase == 1) {
-    if(meas_bmp.size() >= 3) {
-      size += meas_bmp[(bmp_size / 3) - 1].add_to_radio_message(message);
-      size += meas_bmp[((bmp_size / 3) * 2) - 1].add_to_radio_message(message);
-      size += meas_bmp[bmp_size - 1].add_to_radio_message(message);
+    if(bmp_size >= 3) {
+      size += meas_bmp[(bmp_size / 3) - 1].add_to_radio_message(message+size);
+      size += meas_bmp[((bmp_size / 3) * 2) - 1].add_to_radio_message(message+size);
+      size += meas_bmp[bmp_size - 1].add_to_radio_message(message+size);
     } else if(bmp_size == 2) {
-      size += meas_bmp[bmp_size - 2].add_to_radio_message(message);
-      size += meas_bmp[bmp_size - 1].add_to_radio_message(message);
+      size += meas_bmp[bmp_size - 2].add_to_radio_message(message+size);
+      size += meas_bmp[bmp_size - 1].add_to_radio_message(message+size);
     } else if(bmp_size == 1) {
-      size += meas_bmp[bmp_size - 1].add_to_radio_message(message);
+      size += meas_bmp[bmp_size - 1].add_to_radio_message(message+size);
     }
     if(acc_size >= 2) {
-      size += meas_acc[(acc_size / 2) - 1].add_to_radio_message(message);
-      size += meas_acc[acc_size - 1].add_to_radio_message(message);
+      size += meas_acc[(acc_size / 2) - 1].add_to_radio_message(message+size);
+      size += meas_acc[acc_size - 1].add_to_radio_message(message+size);
     } else if(meas_acc.size()==1) {
-      size += meas_acc[acc_size - 1].add_to_radio_message(message);
+      size += meas_acc[acc_size - 1].add_to_radio_message(message+size);
     }
     if(wind_size>=1) {
-      size += meas_wind[wind_size-1].add_to_radio_message(message);
+      size += meas_wind[wind_size-1].add_to_radio_message(message+size);
     }
     if(gps_size>=1) {
-      size += meas_gps[gps_size - 1].add_to_radio_message(message);
+      size += meas_gps[gps_size - 1].add_to_radio_message(message+size);
     }
   } else {
     // Phase 2.
     if(bmp_size >= 2) {
-      size += meas_bmp[(bmp_size / 2) - 1].add_to_radio_message(message);
-      size += meas_bmp[bmp_size - 1].add_to_radio_message(message);
+      size += meas_bmp[(bmp_size / 2) - 1].add_to_radio_message(message+size);
+      size += meas_bmp[bmp_size - 1].add_to_radio_message(message+size);
     } else if(bmp_size == 1) {
-      size += meas_bmp[bmp_size - 1].add_to_radio_message(message);
+      size += meas_bmp[bmp_size - 1].add_to_radio_message(message+size);
     }
     if(meas_wind.size() >= 2) {
-      size += meas_wind[(wind_size / 2) - 1].add_to_radio_message(message);
-      size += meas_wind[wind_size - 1].add_to_radio_message(message);
+      size += meas_wind[(wind_size / 2) - 1].add_to_radio_message(message+size);
+      size += meas_wind[wind_size - 1].add_to_radio_message(message+size);
     } else if(wind_size == 1) {
-      size += meas_wind[wind_size - 1].add_to_radio_message(message);
+      size += meas_wind[wind_size - 1].add_to_radio_message(message+size);
     }
     if(meas_co2.size()>=1) {
-      size += meas_co2[meas_co2.size() - 1].add_to_radio_message(message);
+      size += meas_co2[meas_co2.size() - 1].add_to_radio_message(message+size);
     }
     if(gps_size>=1) {
-      size += meas_gps[gps_size - 1].add_to_radio_message(message);
+      size += meas_gps[gps_size - 1].add_to_radio_message(message+size);
     }
     if(ens_size >= 2) {
-      size += meas_ens[(ens_size / 2) - 1].add_to_radio_message(message);
-      size += meas_ens[ens_size - 1].add_to_radio_message(message);
+      size += meas_ens[(ens_size / 2) - 1].add_to_radio_message(message+size);
+      size += meas_ens[ens_size - 1].add_to_radio_message(message+size);
     } else if(ens_size == 1) {
-      size += meas_ens[ens_size - 1].add_to_radio_message(message);
+      size += meas_ens[ens_size - 1].add_to_radio_message(message+size);
     }
   }
   
@@ -487,7 +485,9 @@ void setup() {
 
   #ifdef RSD_DEBUG
   Serial.begin(115200);
-  // while (!Serial);
+  for (int i = 0; i < 3; i++)
+    if (!Serial) delay(100);
+  if (Serial) Serial.println("Serial INIT OK");
   #endif
 
   // Initialize I2C communication.
