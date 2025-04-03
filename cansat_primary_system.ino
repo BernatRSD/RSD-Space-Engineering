@@ -1,8 +1,11 @@
+/**************************************************
+ *  Board: Adafruit Feather ESP32-S3 Reverse TFT  *
+ **************************************************/
 #ifdef CANSAT_PRIMARY_SYSTEM
 
-// #ifndef ADAFRUIT_FEATHER_ESP32S3_REVERSETFT
-// #error "Select Adafruit Feather ESP32-S3 Reverse TFT board for the primary system!"
-// #endif
+#ifndef ARDUINO_ADAFRUIT_FEATHER_ESP32S3_REVTFT
+#error "Select Adafruit Feather ESP32-S3 Reverse TFT board for the primary system!"
+#endif
 
 #include "rsd_bmp390.h"
 #include "rsd_environment.h"
@@ -39,7 +42,6 @@ float Ground_Altitude = 0.0;
 // LoRa radio
 RH_RF95 rf95(RF95_CS, RF95_INT);
 bool radio_ok = false;
-uint32_t phase1_enter_time = 0;
 //queue
 QueueHandle_t radio_queue;
 QueueHandle_t sd_card_queue;
@@ -62,7 +64,7 @@ bool max17_ok = false;
 //phasing
 std::vector<SensorMeasurement> Recent_Measurements;
 uint8_t phase=0;
-
+uint32_t phase1_enter_time = 0;
 
 
 void update_tft() {
@@ -136,13 +138,6 @@ void send_radio_message() {
   Serial.printf("*** Reading %d measurement(s) from the radio queue took %.3f ms\n", measurements.size(), (micros() - start) * 0.001);
   #endif
 
-  measurement.type = RADIO_TRANSMISSION;
-  measurement.timestamp = millis();
-  measurement.value.radio_transmission.id = transmission_id++;
-  measurement.value.radio_transmission.previous_transmission_duration = transmission_duration;
-  measurements.push_back(measurement);
-  add_measurement_to_queue(measurement, sd_card_queue);
-  // Send radio message counter.
   for (const auto& measurement : measurements) {
     switch (measurement.type) {
       case TEMPERATURE_PRESSURE_ALTITUDE:
@@ -168,12 +163,24 @@ void send_radio_message() {
         break;
       case CALCULATED_ACCEL:
         meas_calcaccel.push_back(measurement);
+        break;
     }
   }
   #ifdef RSD_DEBUG
   Serial.printf("*** Reading and processing radio queue took %.3f ms\n", (micros() - start) * 0.001);
   #endif
 
+  // Radio transmission message
+  measurement.type = RADIO_TRANSMISSION;
+  measurement.timestamp = millis();
+  measurement.value.radio_transmission.id = transmission_id++;
+  measurement.value.radio_transmission.previous_transmission_duration = transmission_duration;
+  #ifdef RSD_DEBUG
+  Serial.printf("************************* Radio transmission id: %u duration: %u ms\n", transmission_id, transmission_duration);
+  #endif
+  size += measurement.add_to_radio_message(message+size);
+  add_measurement_to_queue(measurement, sd_card_queue);
+  
   size_t bmp_size = meas_bmp.size();
   size_t acc_size = meas_acc.size();
   size_t wind_size = meas_wind.size();
@@ -183,27 +190,27 @@ void send_radio_message() {
   size_t calcaccel_size = meas_calcaccel.size();
 
   if (phase == 0 || phase == 1) {
-    if(meas_bmp.size() >= 3) {
-      size += meas_bmp[(bmp_size / 3) - 1].add_to_radio_message(message);
-      size += meas_bmp[((bmp_size / 3) * 2) - 1].add_to_radio_message(message);
-      size += meas_bmp[bmp_size - 1].add_to_radio_message(message);
+    if(bmp_size >= 3) {
+      size += meas_bmp[(bmp_size / 3) - 1].add_to_radio_message(message+size);
+      size += meas_bmp[((bmp_size / 3) * 2) - 1].add_to_radio_message(message+size);
+      size += meas_bmp[bmp_size - 1].add_to_radio_message(message+size);
     } else if(bmp_size == 2) {
-      size += meas_bmp[bmp_size - 2].add_to_radio_message(message);
-      size += meas_bmp[bmp_size - 1].add_to_radio_message(message);
+      size += meas_bmp[bmp_size - 2].add_to_radio_message(message+size);
+      size += meas_bmp[bmp_size - 1].add_to_radio_message(message+size);
     } else if(bmp_size == 1) {
-      size += meas_bmp[bmp_size - 1].add_to_radio_message(message);
+      size += meas_bmp[bmp_size - 1].add_to_radio_message(message+size);
     }
     if(acc_size >= 2) {
-      size += meas_acc[(acc_size / 2) - 1].add_to_radio_message(message);
-      size += meas_acc[acc_size - 1].add_to_radio_message(message);
+      size += meas_acc[(acc_size / 2) - 1].add_to_radio_message(message+size);
+      size += meas_acc[acc_size - 1].add_to_radio_message(message+size);
     } else if(meas_acc.size()==1) {
-      size += meas_acc[acc_size - 1].add_to_radio_message(message);
+      size += meas_acc[acc_size - 1].add_to_radio_message(message+size);
     }
     if(wind_size>=1) {
-      size += meas_wind[wind_size-1].add_to_radio_message(message);
+      size += meas_wind[wind_size-1].add_to_radio_message(message+size);
     }
     if(gps_size>=1) {
-      size += meas_gps[gps_size - 1].add_to_radio_message(message);
+      size += meas_gps[gps_size - 1].add_to_radio_message(message+size);
     }
     if(max17_size>=1) {
       size += meas_max17[max17_size - 1].add_to_radio_message(message);
@@ -214,28 +221,28 @@ void send_radio_message() {
   } else {
     // Phase 2.
     if(bmp_size >= 2) {
-      size += meas_bmp[(bmp_size / 2) - 1].add_to_radio_message(message);
-      size += meas_bmp[bmp_size - 1].add_to_radio_message(message);
+      size += meas_bmp[(bmp_size / 2) - 1].add_to_radio_message(message+size);
+      size += meas_bmp[bmp_size - 1].add_to_radio_message(message+size);
     } else if(bmp_size == 1) {
-      size += meas_bmp[bmp_size - 1].add_to_radio_message(message);
+      size += meas_bmp[bmp_size - 1].add_to_radio_message(message+size);
     }
     if(meas_wind.size() >= 2) {
-      size += meas_wind[(wind_size / 2) - 1].add_to_radio_message(message);
-      size += meas_wind[wind_size - 1].add_to_radio_message(message);
+      size += meas_wind[(wind_size / 2) - 1].add_to_radio_message(message+size);
+      size += meas_wind[wind_size - 1].add_to_radio_message(message+size);
     } else if(wind_size == 1) {
-      size += meas_wind[wind_size - 1].add_to_radio_message(message);
+      size += meas_wind[wind_size - 1].add_to_radio_message(message+size);
     }
     if(meas_co2.size()>=1) {
-      size += meas_co2[meas_co2.size() - 1].add_to_radio_message(message);
+      size += meas_co2[meas_co2.size() - 1].add_to_radio_message(message+size);
     }
     if(gps_size>=1) {
-      size += meas_gps[gps_size - 1].add_to_radio_message(message);
+      size += meas_gps[gps_size - 1].add_to_radio_message(message+size);
     }
     if(ens_size >= 2) {
-      size += meas_ens[(ens_size / 2) - 1].add_to_radio_message(message);
-      size += meas_ens[ens_size - 1].add_to_radio_message(message);
+      size += meas_ens[(ens_size / 2) - 1].add_to_radio_message(message+size);
+      size += meas_ens[ens_size - 1].add_to_radio_message(message+size);
     } else if(ens_size == 1) {
-      size += meas_ens[ens_size - 1].add_to_radio_message(message);
+      size += meas_ens[ens_size - 1].add_to_radio_message(message+size);
     }
     if(max17_size>=1) {
       size += meas_max17[max17_size - 1].add_to_radio_message(message);
@@ -273,7 +280,6 @@ void phasing() {
     }
 
     Recent_Measurements=measurements;
-//ellenőrizni!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     float prev_velocity=(measurements[13].value.tpa.altitude-measurements[0].value.tpa.altitude)/(measurements[13].timestamp-measurements[0].timestamp);
     float velocity=(measurements[15].value.tpa.altitude-measurements[14].value.tpa.altitude)/(measurements[15].timestamp-measurements[14].timestamp);
     float acceleration=(velocity-prev_velocity)/(measurements[15].timestamp-measurements[7].timestamp);
@@ -295,7 +301,6 @@ void phasing() {
     }
   }
 }
-
 
 /*****************************
  *  Task Running on Core 0:  *
@@ -501,12 +506,12 @@ void task1(void *parameters) {
       Serial.printf("%s TASK1 IDLE took %.3f ms\n", timestamp_to_string(now).c_str(), (micros() - idle_start) * 0.001);
       #endif
     } else if(now >= phasing_timer) {
-      phasing_timer+=100;
-      #ifdef RSD_DEBUG
-      Serial.printf("phasing \n");
-      #endif
-      phasing();
-    } else if (now >= radio_timer && radio_ok) {
+       phasing_timer+=100;
+       #ifdef RSD_DEBUG
+       Serial.printf("phasing \n");
+       #endif
+       phasing();
+     } else if (now >= radio_timer && radio_ok) {
       #ifdef RSD_DEBUG
       Serial.printf("phase: %u\n", phase);
       #endif
