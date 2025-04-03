@@ -63,8 +63,8 @@ Adafruit_MAX17048 battery_monitor;
 bool max17_ok = false;
 //phasing
 std::vector<SensorMeasurement> Recent_Measurements;
-uint8_t phase=0;
-uint32_t phase1_enter_time = 0;
+uint8_t phase =0;
+uint32_t phase2_enter_time = 0;
 
 
 void update_tft() {
@@ -144,7 +144,8 @@ void send_radio_message() {
         meas_bmp.push_back(measurement);
         break;
       case WIND_SPEED:
-        meas_wind.push_back(measurement);
+        if (phase != 1)
+          meas_wind.push_back(measurement);
         break;
       case ACCELEROMETER:
         meas_acc.push_back(measurement);
@@ -189,7 +190,7 @@ void send_radio_message() {
   size_t max17_size = meas_max17.size();
   size_t calcaccel_size = meas_calcaccel.size();
 
-  if (phase == 0 || phase == 1) {
+  if (phase < 3) {
     if(bmp_size >= 3) {
       size += meas_bmp[(bmp_size / 3) - 1].add_to_radio_message(message+size);
       size += meas_bmp[((bmp_size / 3) * 2) - 1].add_to_radio_message(message+size);
@@ -219,8 +220,8 @@ void send_radio_message() {
       size += meas_calcaccel[calcaccel_size - 1].add_to_radio_message(message);
     }
   } else {
-    // Phase 2.
-    if(bmp_size >= 2) {
+    // Phase 3.
+    if(bmp_size >= 3) {
       size += meas_bmp[(bmp_size / 2) - 1].add_to_radio_message(message+size);
       size += meas_bmp[bmp_size - 1].add_to_radio_message(message+size);
     } else if(bmp_size == 1) {
@@ -292,11 +293,14 @@ void phasing() {
     add_measurement_to_queues(measurement, {radio_queue});
 
     
-    if(velocity>=7 || prev_velocity>=7 || acceleration >=10) {
+    if((velocity >= 7 || prev_velocity >= 7) && phase == 0) {
       phase++;
-      phase1_enter_time = now;
     }
-    if (phase == 1 && now - phase1_enter_time >= 210000) { // 3.5 min
+    if((velocity < 0 || prev_velocity <= 0) && phase == 1) {
+      phase ++;
+      phase2_enter_time = now;
+    }
+    if (phase == 2 && now - phase2_enter_time >= 120000) { // 2 min
       phase++;
     }
   }
@@ -505,7 +509,7 @@ void task1(void *parameters) {
       #ifdef RSD_DEBUG
       Serial.printf("%s TASK1 IDLE took %.3f ms\n", timestamp_to_string(now).c_str(), (micros() - idle_start) * 0.001);
       #endif
-    } else if(now >= phasing_timer) {
+    } else if(now >= phasing_timer && phase != 3) {
        phasing_timer+=100;
        #ifdef RSD_DEBUG
        Serial.printf("phasing \n");
@@ -518,7 +522,9 @@ void task1(void *parameters) {
       if (phase == 0) { 
         radio_timer += 1000;
       } else if (phase == 1) {
-        radio_timer += 500;
+        radio_timer += 300;
+      } else if (phase == 2) {
+        radio_timer += 300;
       } else {
         radio_timer += 5000;
       }
@@ -547,9 +553,7 @@ void setup() {
 
   #ifdef RSD_DEBUG
   Serial.begin(115200);
-  for (int i = 0; i < 3; i++)
-    if (!Serial) delay(100);
-  if (Serial) Serial.println("Serial INIT OK");
+  // while (!Serial);
   #endif
 
   // Initialize I2C communication.
