@@ -184,9 +184,11 @@ struct RadioTransmission {
   uint16_t id;
   uint16_t previous_transmission_duration;
 
-  static inline const SensorInfo info{"transmission", {"Radio transmission id"}};
+  static inline const SensorInfo info{"transmission", {"Radio transmission id", "Previous transmission duration [ms]"}};
   std::string as_string() const {
-    return std::to_string(id);
+    const auto i = std::to_string(id);
+    const auto d = std::to_string(previous_transmission_duration);
+    return i + "\t" + d;
   }
 };
 
@@ -204,17 +206,17 @@ struct RadioReception {
   }
 };
 
-struct CalculatedAccel {
-  float acceleration;
-  float velocity;
-
-  static inline const SensorInfo info{"calcaccel", {"Acceleration [g]", "Velocity [m/s]"}};
-  std::string as_string() const {
-    const auto a = std::to_string(acceleration);
-    const auto v = std::to_string(velocity);
-    return a + "\t" + v;
-  }
-};
+ struct CalculatedAccel {
+   float acceleration;
+   float velocity;
+ 
+   static inline const SensorInfo info{"calcaccel", {"Acceleration [g]", "Velocity [m/s]"}};
+   std::string as_string() const {
+     const auto a = std::to_string(acceleration);
+     const auto v = std::to_string(velocity);
+     return a + "\t" + v;
+   }
+ };
 
 const SensorInfo& sensor_info(const SensorType type) {
   static SensorInfo undefined{"undef", {}};
@@ -323,6 +325,7 @@ struct SensorMeasurement {
         break;
       case RADIO_TRANSMISSION:
         size += pack(value.radio_transmission.id, message+size);
+        size += pack(value.radio_transmission.previous_transmission_duration, message+size);
         break;
       case RADIO_RECEPTION:
         size += pack(value.radio_reception.length, message+size);
@@ -330,9 +333,9 @@ struct SensorMeasurement {
         size += pack(value.radio_reception.signal_strength, message+size);
         break;
       case CALCULATED_ACCEL:
-        size += pack(value.calculated_accel.acceleration, message+size);
-        size += pack(value.calculated_accel.velocity, message+size);
-        break;
+         size += pack(value.calculated_accel.acceleration, message+size);
+         size += pack(value.calculated_accel.velocity, message+size);
+         break;
     }
     return size;
   }
@@ -372,6 +375,7 @@ struct SensorMeasurement {
         break;
       case RADIO_TRANSMISSION:
         size += unpack(value.radio_transmission.id, message+size);
+        size += unpack(value.radio_transmission.previous_transmission_duration, message+size);
         break;
       case RADIO_RECEPTION:
         size += unpack(value.radio_reception.length, message+size);
@@ -383,6 +387,8 @@ struct SensorMeasurement {
   }
 };
 
+
+#ifdef ARDUINO_ADAFRUIT_FEATHER_ESP32S3_REVTFT
 BaseType_t add_measurement_to_queue(const SensorMeasurement& measurement,
                                     QueueHandle_t& queue) {
   return xQueueSendToBack(queue, &measurement, pdMS_TO_TICKS(100));
@@ -396,8 +402,6 @@ BaseType_t add_measurement_to_queues(const SensorMeasurement& measurement,
      result = pdFAIL;
   return result;
 }
-
-
-
+#endif
 
 #endif
