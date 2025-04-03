@@ -3,6 +3,10 @@
  ****************************************/
 #ifdef CANSAT_SECONDARY_SYSTEM
 
+#ifndef ARDUINO_ADAFRUIT_FEATHER_RP2040_RFM
+#error "Select Adafruit Feather RP2040 RFM board for the secondary system!"
+#endif
+
 #include "rsd_bmp390.h"
 #include "rsd_environment.h"
 #include "rsd_helper.h"

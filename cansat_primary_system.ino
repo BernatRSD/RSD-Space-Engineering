@@ -42,12 +42,11 @@ float Ground_Altitude = 0.0;
 // LoRa radio
 RH_RF95 rf95(RF95_CS, RF95_INT);
 bool radio_ok = false;
-uint8_t phase=0;
-uint32_t phase1_enter_time = 0;
 //queue
 QueueHandle_t radio_queue;
 QueueHandle_t sd_card_queue;
 QueueHandle_t tft_queue;
+QueueHandle_t phase_queue;
 // Sox accelerometer
 Adafruit_LSM6DSO32 sox;
 bool accelerometer_ok = false;
@@ -62,7 +61,10 @@ Adafruit_GPS gps(&GPS_SERIAL);
 // Battery monitor
 Adafruit_MAX17048 battery_monitor;
 bool max17_ok = false;
-
+//phasing
+std::vector<SensorMeasurement> Recent_Measurements;
+uint8_t phase=0;
+uint32_t phase1_enter_time = 0;
 
 
 void update_tft() {
@@ -122,7 +124,7 @@ void send_radio_message() {
   uint8_t message[RH_RF95_MAX_MESSAGE_LEN] = {0};
   uint16_t size = 0;
   SensorMeasurement measurement;
-  std::vector<SensorMeasurement> measurements, meas_bmp, meas_wind, meas_acc, meas_ens, meas_co2, meas_gps, meas_max17;
+  std::vector<SensorMeasurement> measurements, meas_bmp, meas_wind, meas_acc, meas_ens, meas_co2, meas_gps, meas_max17,meas_calcaccel;
   static uint16_t transmission_id = 1;
   static uint16_t transmission_duration = 0;
   #ifdef RSD_DEBUG
@@ -159,6 +161,9 @@ void send_radio_message() {
       case MAX17:
         meas_max17.push_back(measurement);
         break;
+      case CALCULATED_ACCEL:
+        meas_calcaccel.push_back(measurement);
+        break;
     }
   }
   #ifdef RSD_DEBUG
@@ -181,6 +186,8 @@ void send_radio_message() {
   size_t wind_size = meas_wind.size();
   size_t gps_size = meas_gps.size();
   size_t ens_size = meas_ens.size();
+  size_t max17_size = meas_max17.size();
+  size_t calcaccel_size = meas_calcaccel.size();
 
   if (phase == 0 || phase == 1) {
     if(bmp_size >= 3) {
@@ -204,6 +211,12 @@ void send_radio_message() {
     }
     if(gps_size>=1) {
       size += meas_gps[gps_size - 1].add_to_radio_message(message+size);
+    }
+    if(max17_size>=1) {
+      size += meas_max17[max17_size - 1].add_to_radio_message(message);
+    }
+    if(calcaccel_size>=1) {
+      size += meas_calcaccel[calcaccel_size - 1].add_to_radio_message(message);
     }
   } else {
     // Phase 2.
@@ -231,6 +244,12 @@ void send_radio_message() {
     } else if(ens_size == 1) {
       size += meas_ens[ens_size - 1].add_to_radio_message(message+size);
     }
+    if(max17_size>=1) {
+      size += meas_max17[max17_size - 1].add_to_radio_message(message);
+    }
+    if(calcaccel_size>=1) {
+      size += meas_calcaccel[calcaccel_size - 1].add_to_radio_message(message);
+    }
   }
   
   digitalWrite(LED_BUILTIN, HIGH);
@@ -246,6 +265,42 @@ void send_radio_message() {
   #endif
 }
 
+void phasing() {
+  SensorMeasurement measurement;
+  uint32_t now=millis();
+  while (xQueueReceive(phase_queue, &measurement, pdMS_TO_TICKS(1)) == pdPASS) {
+    Recent_Measurements.push_back(measurement);
+  }
+
+  if(Recent_Measurements.size()>=16) {
+    std::vector<SensorMeasurement> measurements;
+
+    for(uint8_t i=0;i<16;i++) {
+      measurements.push_back(Recent_Measurements[Recent_Measurements.size()-(16-i)]);
+    }
+
+    Recent_Measurements=measurements;
+    float prev_velocity=(measurements[13].value.tpa.altitude-measurements[0].value.tpa.altitude)/(measurements[13].timestamp-measurements[0].timestamp);
+    float velocity=(measurements[15].value.tpa.altitude-measurements[14].value.tpa.altitude)/(measurements[15].timestamp-measurements[14].timestamp);
+    float acceleration=(velocity-prev_velocity)/(measurements[15].timestamp-measurements[7].timestamp);
+
+    measurement.type=CALCULATED_ACCEL;
+    measurement.value.calculated_accel.acceleration=acceleration/9,81;
+    measurement.value.calculated_accel.velocity=velocity;
+    measurement.timestamp=now;
+
+    add_measurement_to_queues(measurement, {radio_queue});
+
+    
+    if(velocity>=7 || prev_velocity>=7 || acceleration >=10) {
+      phase++;
+      phase1_enter_time = now;
+    }
+    if (phase == 1 && now - phase1_enter_time >= 210000) { // 3.5 min
+      phase++;
+    }
+  }
+}
 
 /*****************************
  *  Task Running on Core 0:  *
@@ -299,7 +354,7 @@ void task0(void *parameters) {
         #endif
         // unsigned long end = micros();
         measurement.timestamp = now;
-        add_measurement_to_queues(measurement, {radio_queue, sd_card_queue, tft_queue});
+        add_measurement_to_queues(measurement, {radio_queue, sd_card_queue, tft_queue, phase_queue});
         bmp1_recent_pressure = tpa.pressure;
         #ifdef RSD_DEBUG
         Serial.printf("%s BMP1 %s\n", now_str.c_str(), tpa.as_string().c_str());
@@ -431,6 +486,7 @@ void task0(void *parameters) {
 void task1(void *parameters) {
   uint32_t start = millis();
   uint32_t radio_timer = start;
+  uint32_t phasing_timer = start;
   uint32_t sd_card_timer = start;
   uint32_t tft_timer = start;
   uint32_t idle_timer = start;
@@ -449,7 +505,13 @@ void task1(void *parameters) {
       #ifdef RSD_DEBUG
       Serial.printf("%s TASK1 IDLE took %.3f ms\n", timestamp_to_string(now).c_str(), (micros() - idle_start) * 0.001);
       #endif
-    } else if (now >= radio_timer && radio_ok) {
+    } else if(now >= phasing_timer) {
+       phasing_timer+=100;
+       #ifdef RSD_DEBUG
+       Serial.printf("phasing \n");
+       #endif
+       phasing();
+     } else if (now >= radio_timer && radio_ok) {
       #ifdef RSD_DEBUG
       Serial.printf("phase: %u\n", phase);
       #endif

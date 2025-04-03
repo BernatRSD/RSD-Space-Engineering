@@ -24,6 +24,7 @@ typedef enum {
   MAX17,
   RADIO_TRANSMISSION,
   RADIO_RECEPTION,
+  CALCULATED_ACCEL,
   SENSOR_TYPE_COUNT  // Always keep it in the last position!
 } SensorType;
 
@@ -205,6 +206,18 @@ struct RadioReception {
   }
 };
 
+ struct CalculatedAccel {
+   float acceleration;
+   float velocity;
+ 
+   static inline const SensorInfo info{"calcaccel", {"Acceleration [g]", "Velocity [m/s]"}};
+   std::string as_string() const {
+     const auto a = std::to_string(acceleration);
+     const auto v = std::to_string(velocity);
+     return a + "\t" + v;
+   }
+ };
+
 const SensorInfo& sensor_info(const SensorType type) {
   static SensorInfo undefined{"undef", {}};
   switch (type) {
@@ -241,6 +254,7 @@ union SensorValue {
   Max17 max17;
   RadioTransmission radio_transmission;
   RadioReception radio_reception;
+  CalculatedAccel calculated_accel;
 };
 
 struct SensorMeasurement {
@@ -318,6 +332,10 @@ struct SensorMeasurement {
         size += pack(value.radio_reception.measurements, message+size);
         size += pack(value.radio_reception.signal_strength, message+size);
         break;
+      case CALCULATED_ACCEL:
+         size += pack(value.calculated_accel.acceleration, message+size);
+         size += pack(value.calculated_accel.velocity, message+size);
+         break;
     }
     return size;
   }

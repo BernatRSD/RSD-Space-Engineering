@@ -9,8 +9,8 @@
  *  Adafruit Feather RP2040 RFM                          *
  * *******************************************************/
 
-// #define CANSAT_PRIMARY_SYSTEM
-#define CANSAT_SECONDARY_SYSTEM
+#define CANSAT_PRIMARY_SYSTEM
+// #define CANSAT_SECONDARY_SYSTEM
 // #define GROUND_STATION
 
 
