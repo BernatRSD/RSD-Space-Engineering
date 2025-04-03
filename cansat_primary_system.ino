@@ -300,7 +300,7 @@ void phasing() {
       phase ++;
       phase2_enter_time = now;
     }
-    if (phase == 2 && now - phase2_enter_time >= 120000) { // 2 min
+    if (phase == 2 && now - phase2_enter_time >= 180000) { // 3 min
       phase++;
     }
   }
@@ -522,9 +522,9 @@ void task1(void *parameters) {
       if (phase == 0) { 
         radio_timer += 1000;
       } else if (phase == 1) {
-        radio_timer += 300;
+        radio_timer += 500;
       } else if (phase == 2) {
-        radio_timer += 300;
+        radio_timer += 500;
       } else {
         radio_timer += 5000;
       }
