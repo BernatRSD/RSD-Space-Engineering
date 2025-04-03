@@ -207,11 +207,14 @@ struct RadioReception {
 };
 
  struct CalculatedAccel {
+   float acceleration;
    float velocity;
  
-   static inline const SensorInfo info{"calcaccel", {"Velocity [m/s]"}};
+   static inline const SensorInfo info{"calcaccel", {"Acceleration [g]", "Velocity [m/s]"}};
    std::string as_string() const {
-     return std::to_string(velocity);
+     const auto a = std::to_string(acceleration);
+     const auto v = std::to_string(velocity);
+     return a + "\t" + v;
    }
  };
 
@@ -330,6 +333,7 @@ struct SensorMeasurement {
         size += pack(value.radio_reception.signal_strength, message+size);
         break;
       case CALCULATED_ACCEL:
+         size += pack(value.calculated_accel.acceleration, message+size);
          size += pack(value.calculated_accel.velocity, message+size);
          break;
     }
@@ -378,9 +382,6 @@ struct SensorMeasurement {
         size += unpack(value.radio_reception.measurements, message+size);
         size += unpack(value.radio_reception.signal_strength, message+size);
         break;
-      case CALCULATED_ACCEL:
-         size += unpack(value.calculated_accel.velocity, message+size);
-         break;
     }
     return size;
   }
